@@ -1,0 +1,416 @@
+import type { Env, HostConfig } from './config';
+import { getEncKey } from './crypto';
+import * as tg from './telegram';
+import { TelegramError } from './telegram';
+import {
+  getStored,
+  putStored,
+  createTenant,
+  deleteTenant,
+  listTenantsByOwner,
+  listTenantIds,
+  findTenantByUsername,
+  getTenant,
+  type TenantCfg,
+} from './tenant';
+import type { TgMessage, DisplayMode } from './types';
+import { logError, logEvent } from './security';
+
+interface UserState {
+  step: 'idle' | 'awaiting_token';
+}
+
+const USER_STATE_TTL = 3600;
+
+async function getState(kv: KVNamespace, uid: string): Promise<UserState> {
+  const s = await kv.get<UserState>(`manager:user-state-${uid}`, { type: 'json' });
+  return s ?? { step: 'idle' };
+}
+
+async function setState(kv: KVNamespace, uid: string, state: UserState): Promise<void> {
+  await kv.put(`manager:user-state-${uid}`, JSON.stringify(state), {
+    expirationTtl: USER_STATE_TTL,
+  });
+}
+
+export async function handleManagerMessage(
+  env: Env,
+  host: HostConfig,
+  baseUrl: string,
+  message: TgMessage,
+): Promise<void> {
+  if (message.chat.type !== 'private') return;
+
+  const senderId = String(message.chat.id);
+  const text = (message.text ?? '').trim();
+  const isHost = senderId === host.hostUid;
+
+  const state = await getState(env.nfd, senderId);
+  if (state.step === 'awaiting_token') {
+    await handleTokenInput(env, host, baseUrl, senderId, text);
+    return;
+  }
+
+  if (text === '/start') {
+    await reply(host, senderId, '欢迎使用 Relay-Bot 管家。\n/setup 接入新 bot；/help 查看完整命令清单。');
+    return;
+  }
+  if (text === '/help') {
+    await reply(host, senderId, helpText(isHost));
+    return;
+  }
+  if (text === '/whoami') {
+    await reply(host, senderId, `Your chat id: ${senderId}`);
+    return;
+  }
+  if (text === '/cancel') {
+    await setState(env.nfd, senderId, { step: 'idle' });
+    await reply(host, senderId, '已重置会话状态。');
+    return;
+  }
+  if (text === '/setup') {
+    await setState(env.nfd, senderId, { step: 'awaiting_token' });
+    await reply(
+      host,
+      senderId,
+      '请粘贴你从 BotFather 拿到的 bot token（形如 12345:ABC...）。\n/cancel 中止。',
+    );
+    return;
+  }
+  if (text === '/list') {
+    await handleList(env, host, senderId);
+    return;
+  }
+
+  const m = text.match(/^\/(\w+)(?:\s+(.+))?$/);
+  if (!m) {
+    await reply(host, senderId, '未知命令。/help 查看可用命令。');
+    return;
+  }
+  const cmd = m[1];
+  const args = (m[2] ?? '').trim();
+
+  switch (cmd) {
+    case 'info':
+      await handleInfo(env, host, senderId, args, isHost);
+      return;
+    case 'displaymode':
+      await handleDisplaymode(env, host, senderId, args, isHost);
+      return;
+    case 'pause':
+      await handlePauseResume(env, host, baseUrl, senderId, args, true, isHost);
+      return;
+    case 'resume':
+      await handlePauseResume(env, host, baseUrl, senderId, args, false, isHost);
+      return;
+    case 'delete':
+      await handleDelete(env, host, senderId, args, isHost);
+      return;
+    case 'host_list':
+      if (!isHost) {
+        await reply(host, senderId, '仅 host 可用。');
+        return;
+      }
+      await handleHostList(env, host, senderId);
+      return;
+    default:
+      await reply(host, senderId, `未知命令 /${cmd}。/help 查看可用命令。`);
+  }
+}
+
+async function reply(host: HostConfig, chatId: string | number, text: string): Promise<void> {
+  try {
+    await tg.sendMessage(host.managerBotToken, { chat_id: chatId, text });
+  } catch (e) {
+    if (e instanceof TelegramError) {
+      logError('manager_reply', e);
+      return;
+    }
+    throw e;
+  }
+}
+
+function helpText(isHost: boolean): string {
+  const base = [
+    '管家 bot 命令：',
+    '',
+    '/setup - 接入一个新 bot（粘贴 BotFather 给的 token）',
+    '/list - 看你拥有的所有 bot',
+    '/info <bot_username> - 看某个 bot 的详细信息',
+    '/displaymode <bot_username> <native|tag|hex> - 切换显示模式',
+    '/pause <bot_username> - 暂停（注销 webhook）',
+    '/resume <bot_username> - 恢复（重新注册 webhook）',
+    '/delete <bot_username> - 删除 bot（再加 --yes 真正执行）',
+    '/whoami - 显示你的 Telegram UID',
+    '/cancel - 重置当前会话状态',
+  ];
+  if (isHost) {
+    base.push('', 'Host 命令：', '/host_list - 列出所有租户');
+  }
+  return base.join('\n');
+}
+
+async function handleTokenInput(
+  env: Env,
+  host: HostConfig,
+  baseUrl: string,
+  senderId: string,
+  token: string,
+): Promise<void> {
+  const m = token.match(/^(\d+):[A-Za-z0-9_-]+$/);
+  if (!m) {
+    await reply(host, senderId, '看起来不是有效的 token。请重新粘贴，或 /cancel 中止。');
+    return;
+  }
+  const botId = m[1];
+  const encKey = await getEncKey(host.masterEncKey);
+
+  const existing = await getStored(env.nfd, botId);
+  if (existing) {
+    await setState(env.nfd, senderId, { step: 'idle' });
+    await reply(
+      host,
+      senderId,
+      `这个 bot (@${existing.botUsername}) 已被 onboard，所有者 ${existing.ownerUid}。如要重置，所有者须先 /delete ${existing.botUsername} --yes`,
+    );
+    return;
+  }
+
+  let me: tg.TgMe;
+  try {
+    me = await tg.getMe(token);
+  } catch (e) {
+    await setState(env.nfd, senderId, { step: 'idle' });
+    await reply(
+      host,
+      senderId,
+      'Telegram API 验证失败：' +
+        (e instanceof TelegramError ? e.detail : 'unknown') +
+        '\n请确认 token 正确，或 /setup 重试。',
+    );
+    return;
+  }
+
+  const cfg = await createTenant(env.nfd, encKey, {
+    token,
+    ownerUid: senderId,
+    botUsername: me.username,
+    botId,
+  });
+
+  const target = `${baseUrl}/wh/${botId}`;
+  try {
+    await tg.setWebhook(token, { url: target, secret_token: cfg.webhookSecret });
+  } catch (e) {
+    await setState(env.nfd, senderId, { step: 'idle' });
+    await reply(
+      host,
+      senderId,
+      '存储成功但 setWebhook 失败：' +
+        (e instanceof TelegramError ? e.detail : 'unknown') +
+        `\n你可以 /resume ${me.username} 重试。`,
+    );
+    return;
+  }
+
+  await setState(env.nfd, senderId, { step: 'idle' });
+  logEvent(host.debug, 'tenant_created', { botId, owner: senderId });
+
+  await reply(
+    host,
+    senderId,
+    [
+      `✅ @${me.username} 已上线！`,
+      '',
+      '默认配置：',
+      `· 管理员：${senderId}（即你）`,
+      '· 显示模式：native（Telegram 原生 forward UI）',
+      '· 限速：60s 内每访客 5 条',
+      '',
+      '常用命令（带上 bot 用户名）：',
+      `/info ${me.username}`,
+      `/displaymode ${me.username} tag`,
+      `/pause ${me.username}`,
+      '',
+      '⚠️ 你刚才发的 token 还在我们的对话里。建议长按那条消息选 "Delete for me and bot" 把它从两端清除。',
+    ].join('\n'),
+  );
+}
+
+async function handleList(env: Env, host: HostConfig, senderId: string): Promise<void> {
+  const encKey = await getEncKey(host.masterEncKey);
+  const tenants = await listTenantsByOwner(env.nfd, senderId, encKey);
+  if (tenants.length === 0) {
+    await reply(host, senderId, '你还没有 onboard 任何 bot。/setup 开始。');
+    return;
+  }
+  const lines = tenants.map(
+    (t) => `@${t.botUsername} - ${t.paused ? 'paused' : 'active'} - ${t.displayMode}`,
+  );
+  await reply(host, senderId, ['你拥有的 bot：', ...lines].join('\n'));
+}
+
+async function resolveTenant(
+  env: Env,
+  host: HostConfig,
+  arg: string,
+  ownerUid: string,
+  isHost: boolean,
+): Promise<TenantCfg | string> {
+  const username = arg.trim().split(/\s+/)[0];
+  if (!username) return '请提供 bot 用户名，例如 /info your_bot 或 /info @your_bot';
+  const encKey = await getEncKey(host.masterEncKey);
+  const t = await findTenantByUsername(
+    env.nfd,
+    encKey,
+    username,
+    isHost ? undefined : ownerUid,
+  );
+  if (!t) return `未找到 ${username}（注意是否你拥有的 bot）。`;
+  return t;
+}
+
+async function handleInfo(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+  isHost: boolean,
+): Promise<void> {
+  const r = await resolveTenant(env, host, args, senderId, isHost);
+  if (typeof r === 'string') return reply(host, senderId, r);
+  const created = new Date(r.createdAt).toISOString().slice(0, 10);
+  await reply(
+    host,
+    senderId,
+    [
+      `@${r.botUsername}`,
+      `bot_id: ${r.botId}`,
+      `owner: ${r.ownerUid}`,
+      `admins: ${[...r.adminUids].join(', ')}`,
+      `display: ${r.displayMode}`,
+      `status: ${r.paused ? 'paused' : 'active'}`,
+      `created: ${created}`,
+    ].join('\n'),
+  );
+}
+
+async function handleDisplaymode(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+  isHost: boolean,
+): Promise<void> {
+  const parts = args.split(/\s+/);
+  if (parts.length < 2) {
+    await reply(host, senderId, '用法：/displaymode <bot_username> <native|tag|hex>');
+    return;
+  }
+  const [username, modeRaw] = parts;
+  const mode = modeRaw.toLowerCase();
+  if (mode !== 'native' && mode !== 'tag' && mode !== 'hex') {
+    await reply(host, senderId, '模式必须是 native / tag / hex 之一。');
+    return;
+  }
+  const r = await resolveTenant(env, host, username, senderId, isHost);
+  if (typeof r === 'string') return reply(host, senderId, r);
+  const stored = await getStored(env.nfd, r.botId);
+  if (!stored) {
+    await reply(host, senderId, '内部错误：找不到存储记录。');
+    return;
+  }
+  stored.displayMode = mode as DisplayMode;
+  await putStored(env.nfd, r.botId, stored);
+  await reply(host, senderId, `@${r.botUsername} 的显示模式已设为 ${mode}。`);
+}
+
+async function handlePauseResume(
+  env: Env,
+  host: HostConfig,
+  baseUrl: string,
+  senderId: string,
+  args: string,
+  pause: boolean,
+  isHost: boolean,
+): Promise<void> {
+  const r = await resolveTenant(env, host, args, senderId, isHost);
+  if (typeof r === 'string') return reply(host, senderId, r);
+  const stored = await getStored(env.nfd, r.botId);
+  if (!stored) {
+    await reply(host, senderId, '内部错误：找不到存储记录。');
+    return;
+  }
+
+  if (pause) {
+    try {
+      await tg.deleteWebhook(r.botToken);
+    } catch (e) {
+      if (!(e instanceof TelegramError)) throw e;
+    }
+    stored.paused = true;
+    await putStored(env.nfd, r.botId, stored);
+    await reply(host, senderId, `@${r.botUsername} 已暂停（webhook 已注销）。`);
+    return;
+  }
+
+  const target = `${baseUrl}/wh/${r.botId}`;
+  try {
+    await tg.setWebhook(r.botToken, { url: target, secret_token: r.webhookSecret });
+  } catch (e) {
+    await reply(
+      host,
+      senderId,
+      'setWebhook 失败：' + (e instanceof TelegramError ? e.detail : 'unknown'),
+    );
+    return;
+  }
+  stored.paused = false;
+  await putStored(env.nfd, r.botId, stored);
+  await reply(host, senderId, `@${r.botUsername} 已恢复（webhook 已重注册）。`);
+}
+
+async function handleDelete(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+  isHost: boolean,
+): Promise<void> {
+  const parts = args.split(/\s+/);
+  const username = parts[0];
+  const yes = parts.includes('--yes');
+  if (!username) {
+    await reply(host, senderId, '用法：/delete <bot_username> --yes');
+    return;
+  }
+  const r = await resolveTenant(env, host, username, senderId, isHost);
+  if (typeof r === 'string') return reply(host, senderId, r);
+
+  if (!yes) {
+    await reply(
+      host,
+      senderId,
+      `确认删除 @${r.botUsername} 吗？将注销 webhook 并清除全部相关 KV 数据，不可撤销。\n如确认：/delete ${r.botUsername} --yes`,
+    );
+    return;
+  }
+  const encKey = await getEncKey(host.masterEncKey);
+  const purged = await deleteTenant(env.nfd, r.botId, encKey);
+  await reply(host, senderId, `@${r.botUsername} 已删除（清除了 ${purged} 个 KV 键）。`);
+  logEvent(host.debug, 'tenant_deleted', { botId: r.botId, owner: senderId });
+}
+
+async function handleHostList(env: Env, host: HostConfig, senderId: string): Promise<void> {
+  const ids = await listTenantIds(env.nfd);
+  if (ids.length === 0) {
+    await reply(host, senderId, '当前无 tenant。');
+    return;
+  }
+  const encKey = await getEncKey(host.masterEncKey);
+  const tenants = await Promise.all(ids.map((id) => getTenant(env.nfd, id, encKey)));
+  const lines = tenants
+    .filter((t): t is TenantCfg => t !== null)
+    .map((t) => `@${t.botUsername} - owner ${t.ownerUid} - ${t.paused ? 'paused' : 'active'}`);
+  await reply(host, senderId, [`所有 tenant (${lines.length})：`, ...lines].join('\n'));
+}

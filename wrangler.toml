@@ -1,0 +1,30 @@
+name = "tg-relay-bot"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+[[kv_namespaces]]
+binding = "nfd"
+id = "c880f077fa9f49678b9f4815a85a7e4f"
+
+# ─── Required secrets (set via `wrangler secret put <name>`) ───────────────
+#   ENV_MANAGER_BOT_TOKEN  Manager bot token (a SEPARATE BotFather bot,
+#                          e.g. @YourPrefixRelayManagerBot). Friends talk to
+#                          this bot to onboard / manage their own bots.
+#   ENV_HOST_UID           Your Telegram UID (super-admin / host).
+#   ENV_MASTER_ENC_KEY     32-byte AES-GCM key, base64-encoded. Encrypts every
+#                          tenant's bot token at rest.
+#                          Generate: `openssl rand -base64 32`
+#                          ONCE SET, NEVER CHANGE — all stored tokens become
+#                          undecryptable, requiring full re-onboard.
+#   ENV_ADMIN_SECRET       Required to access /admin/* endpoints (used to
+#                          register the manager bot's webhook on first deploy).
+#
+# ─── Optional ──────────────────────────────────────────────────────────────
+#   ENV_DEBUG=1            Enable structured debug logging (event=... uk=...).
+#
+# ─── REMOVED in Step 2 (now per-tenant in KV, not env) ─────────────────────
+#   ENV_BOT_TOKEN, ENV_BOT_SECRET, ENV_HASH_SECRET,
+#   ENV_ADMIN_UID(S), ENV_DISPLAY_MODE, ENV_START_MESSAGE
+#   You can `wrangler secret delete <name>` these — the new code ignores them.
+#
+# For local dev with `wrangler dev`, mirror the same vars in .dev.vars.

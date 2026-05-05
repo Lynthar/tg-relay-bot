@@ -130,3 +130,9 @@ dist
 .pnp.*
 
 todo.md
+
+# Cloudflare Workers / wrangler
+.dev.vars
+.wrangler/
+dist/
+wrangler.local.toml
