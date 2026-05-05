@@ -1,5 +1,7 @@
 # Relay Bot
 
+**中文** | [English](README.en.md)
+
 一个跑在 Cloudflare Worker 上的 Telegram **双向消息中继 bot 平台**。一份部署可以同时托管你自己 + 朋友们的多个 bot；朋友通过 Telegram 自助 onboard，全程不需要碰 Cloudflare 或代码。
 
 > Fork 自 [LloydAsp/nfd](https://github.com/LloydAsp/nfd)，重写为多租户架构，强化隐私与安全模型。
@@ -234,11 +236,11 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 
 | 命令 | 说明 |
 |---|---|
-| `/start` | 显示欢迎语（owner 可通过管家 bot 自定义，目前默认中英双语） |
+| `/start` | 显示欢迎语（默认中英双语；当前不可通过命令自定义） |
 | `/help` | 显示用法 |
 | `/whoami` | 显示当前发送者的 UID |
 
-仅 owner / admin 可用（即 onboard 这个 bot 的 friend）：
+仅所有者可用（即 onboard 这个 bot 的 friend）：
 
 | 操作 | 效果 |
 |---|---|

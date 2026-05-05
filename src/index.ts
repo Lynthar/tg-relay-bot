@@ -118,9 +118,10 @@ async function processManagerUpdate(
 ): Promise<void> {
   try {
     if (typeof update.update_id !== 'number') return;
+    if (!update.message) return;
+    if (update.message.chat.type !== 'private') return;
     const skv = new ScopedKV(env.nfd, 'manager:dedup-');
     if (await isDuplicateUpdate(skv, update.update_id, DEDUP_TTL_SEC)) return;
-    if (!update.message) return;
     await handleManagerMessage(env, host, baseUrl, update.message);
   } catch (e) {
     logError('manager_update', e);
@@ -135,9 +136,10 @@ async function processTenantUpdate(
 ): Promise<void> {
   try {
     if (typeof update.update_id !== 'number') return;
+    if (!update.message) return;
+    if (update.message.chat.type !== 'private') return;
     const skv = new ScopedKV(env.nfd, `tenant:${tenant.botId}:`);
     if (await isDuplicateUpdate(skv, update.update_id, DEDUP_TTL_SEC)) return;
-    if (!update.message) return;
     await handleTenantMessage(tenant, skv, host.debug, update.message);
   } catch (e) {
     logError('tenant_update', e);

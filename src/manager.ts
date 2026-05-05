@@ -6,12 +6,13 @@ import {
   getStored,
   putStored,
   createTenant,
+  deleteStored,
   deleteTenant,
-  listTenantsByOwner,
-  listTenantIds,
-  findTenantByUsername,
-  getTenant,
-  type TenantCfg,
+  listStored,
+  listStoredByOwner,
+  findStoredByUsername,
+  decryptToken,
+  type StoredEntry,
 } from './tenant';
 import type { TgMessage, DisplayMode } from './types';
 import { logError, logEvent } from './security';
@@ -21,6 +22,7 @@ interface UserState {
 }
 
 const USER_STATE_TTL = 3600;
+const REPLY_MAX_LEN = 3500;
 
 async function getState(kv: KVNamespace, uid: string): Promise<UserState> {
   const s = await kv.get<UserState>(`manager:user-state-${uid}`, { type: 'json' });
@@ -46,7 +48,18 @@ export async function handleManagerMessage(
   const isHost = senderId === host.hostUid;
 
   const state = await getState(env.nfd, senderId);
+
+  // Awaiting-token state: intercept escape commands first, otherwise treat the input as the token.
   if (state.step === 'awaiting_token') {
+    if (text === '/cancel') {
+      await setState(env.nfd, senderId, { step: 'idle' });
+      await reply(host, senderId, '已取消接入流程。');
+      return;
+    }
+    if (text === '/help') {
+      await reply(host, senderId, helpText(isHost));
+      return;
+    }
     await handleTokenInput(env, host, baseUrl, senderId, text);
     return;
   }
@@ -130,6 +143,26 @@ async function reply(host: HostConfig, chatId: string | number, text: string): P
   }
 }
 
+// Send long content as multiple chunks — Telegram caps a single message at 4096 chars.
+async function replyChunked(
+  host: HostConfig,
+  chatId: string,
+  header: string,
+  lines: string[],
+): Promise<void> {
+  let buf = header;
+  for (const line of lines) {
+    const candidate = buf.length === 0 ? line : `${buf}\n${line}`;
+    if (candidate.length > REPLY_MAX_LEN) {
+      if (buf.length > 0) await reply(host, chatId, buf);
+      buf = line;
+    } else {
+      buf = candidate;
+    }
+  }
+  if (buf.length > 0) await reply(host, chatId, buf);
+}
+
 function helpText(isHost: boolean): string {
   const base = [
     '管家 bot 命令：',
@@ -163,6 +196,18 @@ async function handleTokenInput(
     return;
   }
   const botId = m[1];
+
+  // Refuse to onboard the manager bot's own token —— would otherwise hijack the platform.
+  if (botId === host.managerBotId) {
+    await setState(env.nfd, senderId, { step: 'idle' });
+    await reply(
+      host,
+      senderId,
+      '不能用管家 bot 自己的 token 来 onboard。请改用其他 BotFather 创建的 bot 的 token。',
+    );
+    return;
+  }
+
   const encKey = await getEncKey(host.masterEncKey);
 
   const existing = await getStored(env.nfd, botId);
@@ -202,13 +247,19 @@ async function handleTokenInput(
   try {
     await tg.setWebhook(token, { url: target, secret_token: cfg.webhookSecret });
   } catch (e) {
+    // Roll back the partially-onboarded tenant — orphan record would otherwise occupy the botId slot.
+    try {
+      await deleteStored(env.nfd, botId);
+    } catch {
+      // best effort
+    }
     await setState(env.nfd, senderId, { step: 'idle' });
     await reply(
       host,
       senderId,
-      '存储成功但 setWebhook 失败：' +
+      'setWebhook 失败：' +
         (e instanceof TelegramError ? e.detail : 'unknown') +
-        `\n你可以 /resume ${me.username} 重试。`,
+        '\n租户记录已回滚。请检查网络后 /setup 重试。',
     );
     return;
   }
@@ -238,36 +289,33 @@ async function handleTokenInput(
 }
 
 async function handleList(env: Env, host: HostConfig, senderId: string): Promise<void> {
-  const encKey = await getEncKey(host.masterEncKey);
-  const tenants = await listTenantsByOwner(env.nfd, senderId, encKey);
-  if (tenants.length === 0) {
+  const owned = await listStoredByOwner(env.nfd, senderId);
+  if (owned.length === 0) {
     await reply(host, senderId, '你还没有 onboard 任何 bot。/setup 开始。');
     return;
   }
-  const lines = tenants.map(
-    (t) => `@${t.botUsername} - ${t.paused ? 'paused' : 'active'} - ${t.displayMode}`,
+  const lines = owned.map(
+    ({ cfg }) =>
+      `@${cfg.botUsername} - ${cfg.paused ? 'paused' : 'active'} - ${cfg.displayMode}`,
   );
-  await reply(host, senderId, ['你拥有的 bot：', ...lines].join('\n'));
+  await replyChunked(host, senderId, '你拥有的 bot：', lines);
 }
 
-async function resolveTenant(
+async function resolveStored(
   env: Env,
-  host: HostConfig,
   arg: string,
   ownerUid: string,
   isHost: boolean,
-): Promise<TenantCfg | string> {
+): Promise<StoredEntry | string> {
   const username = arg.trim().split(/\s+/)[0];
   if (!username) return '请提供 bot 用户名，例如 /info your_bot 或 /info @your_bot';
-  const encKey = await getEncKey(host.masterEncKey);
-  const t = await findTenantByUsername(
+  const entry = await findStoredByUsername(
     env.nfd,
-    encKey,
     username,
     isHost ? undefined : ownerUid,
   );
-  if (!t) return `未找到 ${username}（注意是否你拥有的 bot）。`;
-  return t;
+  if (!entry) return `未找到 ${username}（注意是否你拥有的 bot）。`;
+  return entry;
 }
 
 async function handleInfo(
@@ -277,19 +325,20 @@ async function handleInfo(
   args: string,
   isHost: boolean,
 ): Promise<void> {
-  const r = await resolveTenant(env, host, args, senderId, isHost);
+  const r = await resolveStored(env, args, senderId, isHost);
   if (typeof r === 'string') return reply(host, senderId, r);
-  const created = new Date(r.createdAt).toISOString().slice(0, 10);
+  const { botId, cfg } = r;
+  const created = new Date(cfg.createdAt).toISOString().slice(0, 10);
   await reply(
     host,
     senderId,
     [
-      `@${r.botUsername}`,
-      `bot_id: ${r.botId}`,
-      `owner: ${r.ownerUid}`,
-      `admins: ${[...r.adminUids].join(', ')}`,
-      `display: ${r.displayMode}`,
-      `status: ${r.paused ? 'paused' : 'active'}`,
+      `@${cfg.botUsername}`,
+      `bot_id: ${botId}`,
+      `owner: ${cfg.ownerUid}`,
+      `admins: ${cfg.adminUids.join(', ')}`,
+      `display: ${cfg.displayMode}`,
+      `status: ${cfg.paused ? 'paused' : 'active'}`,
       `created: ${created}`,
     ].join('\n'),
   );
@@ -313,16 +362,11 @@ async function handleDisplaymode(
     await reply(host, senderId, '模式必须是 native / tag / hex 之一。');
     return;
   }
-  const r = await resolveTenant(env, host, username, senderId, isHost);
+  const r = await resolveStored(env, username, senderId, isHost);
   if (typeof r === 'string') return reply(host, senderId, r);
-  const stored = await getStored(env.nfd, r.botId);
-  if (!stored) {
-    await reply(host, senderId, '内部错误：找不到存储记录。');
-    return;
-  }
-  stored.displayMode = mode as DisplayMode;
-  await putStored(env.nfd, r.botId, stored);
-  await reply(host, senderId, `@${r.botUsername} 的显示模式已设为 ${mode}。`);
+  r.cfg.displayMode = mode as DisplayMode;
+  await putStored(env.nfd, r.botId, r.cfg);
+  await reply(host, senderId, `@${r.cfg.botUsername} 的显示模式已设为 ${mode}。`);
 }
 
 async function handlePauseResume(
@@ -334,29 +378,27 @@ async function handlePauseResume(
   pause: boolean,
   isHost: boolean,
 ): Promise<void> {
-  const r = await resolveTenant(env, host, args, senderId, isHost);
+  const r = await resolveStored(env, args, senderId, isHost);
   if (typeof r === 'string') return reply(host, senderId, r);
-  const stored = await getStored(env.nfd, r.botId);
-  if (!stored) {
-    await reply(host, senderId, '内部错误：找不到存储记录。');
-    return;
-  }
+
+  const encKey = await getEncKey(host.masterEncKey);
+  const token = await decryptToken(r.cfg, encKey);
 
   if (pause) {
     try {
-      await tg.deleteWebhook(r.botToken);
+      await tg.deleteWebhook(token);
     } catch (e) {
       if (!(e instanceof TelegramError)) throw e;
     }
-    stored.paused = true;
-    await putStored(env.nfd, r.botId, stored);
-    await reply(host, senderId, `@${r.botUsername} 已暂停（webhook 已注销）。`);
+    r.cfg.paused = true;
+    await putStored(env.nfd, r.botId, r.cfg);
+    await reply(host, senderId, `@${r.cfg.botUsername} 已暂停（webhook 已注销）。`);
     return;
   }
 
   const target = `${baseUrl}/wh/${r.botId}`;
   try {
-    await tg.setWebhook(r.botToken, { url: target, secret_token: r.webhookSecret });
+    await tg.setWebhook(token, { url: target, secret_token: r.cfg.webhookSecret });
   } catch (e) {
     await reply(
       host,
@@ -365,9 +407,9 @@ async function handlePauseResume(
     );
     return;
   }
-  stored.paused = false;
-  await putStored(env.nfd, r.botId, stored);
-  await reply(host, senderId, `@${r.botUsername} 已恢复（webhook 已重注册）。`);
+  r.cfg.paused = false;
+  await putStored(env.nfd, r.botId, r.cfg);
+  await reply(host, senderId, `@${r.cfg.botUsername} 已恢复（webhook 已重注册）。`);
 }
 
 async function handleDelete(
@@ -384,33 +426,32 @@ async function handleDelete(
     await reply(host, senderId, '用法：/delete <bot_username> --yes');
     return;
   }
-  const r = await resolveTenant(env, host, username, senderId, isHost);
+  const r = await resolveStored(env, username, senderId, isHost);
   if (typeof r === 'string') return reply(host, senderId, r);
 
   if (!yes) {
     await reply(
       host,
       senderId,
-      `确认删除 @${r.botUsername} 吗？将注销 webhook 并清除全部相关 KV 数据，不可撤销。\n如确认：/delete ${r.botUsername} --yes`,
+      `确认删除 @${r.cfg.botUsername} 吗？将注销 webhook 并清除全部相关 KV 数据，不可撤销。\n如确认：/delete ${r.cfg.botUsername} --yes`,
     );
     return;
   }
   const encKey = await getEncKey(host.masterEncKey);
   const purged = await deleteTenant(env.nfd, r.botId, encKey);
-  await reply(host, senderId, `@${r.botUsername} 已删除（清除了 ${purged} 个 KV 键）。`);
+  await reply(host, senderId, `@${r.cfg.botUsername} 已删除（清除了 ${purged} 个 KV 键）。`);
   logEvent(host.debug, 'tenant_deleted', { botId: r.botId, owner: senderId });
 }
 
 async function handleHostList(env: Env, host: HostConfig, senderId: string): Promise<void> {
-  const ids = await listTenantIds(env.nfd);
-  if (ids.length === 0) {
+  const all = await listStored(env.nfd);
+  if (all.length === 0) {
     await reply(host, senderId, '当前无 tenant。');
     return;
   }
-  const encKey = await getEncKey(host.masterEncKey);
-  const tenants = await Promise.all(ids.map((id) => getTenant(env.nfd, id, encKey)));
-  const lines = tenants
-    .filter((t): t is TenantCfg => t !== null)
-    .map((t) => `@${t.botUsername} - owner ${t.ownerUid} - ${t.paused ? 'paused' : 'active'}`);
-  await reply(host, senderId, [`所有 tenant (${lines.length})：`, ...lines].join('\n'));
+  const lines = all.map(
+    ({ cfg }) =>
+      `@${cfg.botUsername} - owner ${cfg.ownerUid} - ${cfg.paused ? 'paused' : 'active'}`,
+  );
+  await replyChunked(host, senderId, `所有 tenant (${lines.length})：`, lines);
 }
