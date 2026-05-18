@@ -128,6 +128,8 @@
 | `/list` | 看你拥有的所有 bot |
 | `/info <bot_username>` | 看某个 bot 的详细信息 |
 | `/displaymode <bot_username> <native\|tag\|hex>` | 切换显示模式（[见下](#显示模式)） |
+| `/admins <bot_username> [add\|remove <uid> \| list]` | 管理管理员（owner 不能被移除） |
+| `/start_message <bot_username> <文案>` | 改 /start 文案（支持多行；最长 1000 字符） |
 | `/pause <bot_username>` | 暂停（注销 webhook，bot 不再接收消息） |
 | `/resume <bot_username>` | 恢复（重新注册 webhook） |
 | `/delete <bot_username> --yes` | 删除（注销 webhook + 清所有 KV） |
@@ -400,12 +402,15 @@ npx wrangler kv namespace delete --binding=nfd
 ## 开发
 
 ```bash
+npm install           # 装依赖
 npm run typecheck     # tsc 类型检查
+npm test              # 跑测试套件（vitest + @cloudflare/vitest-pool-workers，本地全离线）
+npm run test:watch    # 测试 watch 模式
 npm run dev           # 本地起 wrangler dev
 npm run deploy        # 部署到 Cloudflare
 ```
 
-详细的设计决策、模块划分、路线图见 [docs/PLAN.md](docs/PLAN.md)。
+测试位于 `tests/unit/`（纯函数）和 `tests/integration/`（webhook、tenant 隔离、manager 命令）。
 
 ---
 

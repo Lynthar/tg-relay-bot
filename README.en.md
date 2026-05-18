@@ -128,6 +128,8 @@ In the manager bot:
 | `/list` | List bots you own |
 | `/info <bot_username>` | Show details for a bot |
 | `/displaymode <bot_username> <native\|tag\|hex>` | Change display mode (see below) |
+| `/admins <bot_username> [add\|remove <uid> \| list]` | Manage admin UIDs (owner cannot be removed) |
+| `/start_message <bot_username> <text>` | Customize the /start message (multi-line; up to 1000 chars) |
 | `/pause <bot_username>` | Pause (unregister webhook; bot stops receiving) |
 | `/resume <bot_username>` | Resume (re-register webhook) |
 | `/delete <bot_username> --yes` | Delete (unregister webhook + purge all KV) |
@@ -400,12 +402,15 @@ A: Rate limiting. Per-guest cap is 5 per 60s; excess is silently dropped (no fee
 ## Development
 
 ```bash
+npm install           # install dependencies
 npm run typecheck     # tsc type check
+npm test              # run the test suite (vitest + @cloudflare/vitest-pool-workers, fully offline)
+npm run test:watch    # tests in watch mode
 npm run dev           # local wrangler dev
 npm run deploy        # deploy to Cloudflare
 ```
 
-Detailed design decisions, module layout, and roadmap: [docs/PLAN.md](docs/PLAN.md).
+Tests live under `tests/unit/` (pure functions) and `tests/integration/` (webhook, tenant isolation, manager commands).
 
 ---
 
