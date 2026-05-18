@@ -216,6 +216,8 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 | `/list` | 列出你拥有的所有 bot |
 | `/info <bot_username>` | 查看某个 bot 的详情 |
 | `/displaymode <bot_username> <native\|tag\|hex>` | 切换显示模式 |
+| `/admins <bot_username> [add\|remove <uid> \| list]` | 管理管理员列表；不带动作默认 `list`；不能移除 owner |
+| `/start_message <bot_username> <文案>` | 自定义 /start 文案（支持多行，最长 1000 字符） |
 | `/pause <bot_username>` | 暂停 bot |
 | `/resume <bot_username>` | 恢复 bot |
 | `/delete <bot_username> [--yes]` | 删除 bot；不带 `--yes` 仅提示，加上才真删 |
@@ -225,6 +227,8 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 | 命令 | 说明 |
 |---|---|
 | `/host_list` | 列出**所有**租户（含其他朋友的） |
+| `/host_disable <bot_username>` | 强制暂停任意 tenant（不需要是 owner） |
+| `/host_purge <bot_username> --yes` | 强制删除任意 tenant；不带 `--yes` 仅提示 |
 
 ---
 

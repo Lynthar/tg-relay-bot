@@ -216,6 +216,8 @@ Available to both friends and host:
 | `/list` | List bots you own |
 | `/info <bot_username>` | Show details for a bot |
 | `/displaymode <bot_username> <native\|tag\|hex>` | Change display mode |
+| `/admins <bot_username> [add\|remove <uid> \| list]` | Manage admin UIDs; defaults to `list`; the owner cannot be removed |
+| `/start_message <bot_username> <text>` | Customize the /start message (multi-line allowed, up to 1000 chars) |
 | `/pause <bot_username>` | Pause a bot |
 | `/resume <bot_username>` | Resume a bot |
 | `/delete <bot_username> [--yes]` | Delete bot; bare form prints a confirmation, with `--yes` actually deletes |
@@ -225,6 +227,8 @@ Host only:
 | Command | Purpose |
 |---|---|
 | `/host_list` | List **all** tenants (including other friends') |
+| `/host_disable <bot_username>` | Forcibly pause any tenant (no ownership required) |
+| `/host_purge <bot_username> --yes` | Forcibly delete any tenant; bare form only prints confirmation |
 
 ---
 

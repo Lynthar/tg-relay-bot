@@ -95,7 +95,8 @@ export async function handleManagerMessage(
     return;
   }
 
-  const m = text.match(/^\/(\w+)(?:\s+(.+))?$/);
+  // [\s\S] (not .) so args spanning newlines (e.g. multi-line /start_message) still match.
+  const m = text.match(/^\/(\w+)(?:\s+([\s\S]+))?$/);
   if (!m) {
     await reply(host, senderId, '未知命令。/help 查看可用命令。');
     return;
@@ -109,6 +110,12 @@ export async function handleManagerMessage(
       return;
     case 'displaymode':
       await handleDisplaymode(env, host, senderId, args, isHost);
+      return;
+    case 'admins':
+      await handleAdmins(env, host, senderId, args, isHost);
+      return;
+    case 'start_message':
+      await handleStartMessage(env, host, senderId, args, isHost);
       return;
     case 'pause':
       await handlePauseResume(env, host, baseUrl, senderId, args, true, isHost);
@@ -125,6 +132,20 @@ export async function handleManagerMessage(
         return;
       }
       await handleHostList(env, host, senderId);
+      return;
+    case 'host_disable':
+      if (!isHost) {
+        await reply(host, senderId, '仅 host 可用。');
+        return;
+      }
+      await handleHostDisable(env, host, senderId, args);
+      return;
+    case 'host_purge':
+      if (!isHost) {
+        await reply(host, senderId, '仅 host 可用。');
+        return;
+      }
+      await handleHostPurge(env, host, senderId, args);
       return;
     default:
       await reply(host, senderId, `未知命令 /${cmd}。/help 查看可用命令。`);
@@ -171,6 +192,8 @@ function helpText(isHost: boolean): string {
     '/list - 看你拥有的所有 bot',
     '/info <bot_username> - 看某个 bot 的详细信息',
     '/displaymode <bot_username> <native|tag|hex> - 切换显示模式',
+    '/admins <bot_username> [add|remove <uid> | list] - 管理管理员',
+    '/start_message <bot_username> <文案> - 自定义 /start 文案（支持多行）',
     '/pause <bot_username> - 暂停（注销 webhook）',
     '/resume <bot_username> - 恢复（重新注册 webhook）',
     '/delete <bot_username> - 删除 bot（再加 --yes 真正执行）',
@@ -178,7 +201,13 @@ function helpText(isHost: boolean): string {
     '/cancel - 重置当前会话状态',
   ];
   if (isHost) {
-    base.push('', 'Host 命令：', '/host_list - 列出所有租户');
+    base.push(
+      '',
+      'Host 命令：',
+      '/host_list - 列出所有租户',
+      '/host_disable <bot_username> - 强制暂停任意 tenant',
+      '/host_purge <bot_username> --yes - 强制删除任意 tenant',
+    );
   }
   return base.join('\n');
 }
@@ -454,4 +483,200 @@ async function handleHostList(env: Env, host: HostConfig, senderId: string): Pro
       `@${cfg.botUsername} - owner ${cfg.ownerUid} - ${cfg.paused ? 'paused' : 'active'}`,
   );
   await replyChunked(host, senderId, `所有 tenant (${lines.length})：`, lines);
+}
+
+async function handleAdmins(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+  isHost: boolean,
+): Promise<void> {
+  const parts = args.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) {
+    await reply(host, senderId, '用法：/admins <bot_username> [add|remove <uid> | list]');
+    return;
+  }
+  const [username, action = 'list', uid] = parts;
+
+  const r = await resolveStored(env, username, senderId, isHost);
+  if (typeof r === 'string') {
+    await reply(host, senderId, r);
+    return;
+  }
+
+  if (action === 'list') {
+    const lines = r.cfg.adminUids.map(
+      (u) => `· ${u}${u === r.cfg.ownerUid ? ' (owner)' : ''}`,
+    );
+    await reply(host, senderId, [`@${r.cfg.botUsername} admins:`, ...lines].join('\n'));
+    return;
+  }
+
+  if (action !== 'add' && action !== 'remove') {
+    await reply(host, senderId, '动作必须是 add / remove / list 之一。');
+    return;
+  }
+
+  if (!uid) {
+    await reply(host, senderId, `用法：/admins <bot_username> ${action} <uid>`);
+    return;
+  }
+
+  if (!/^\d+$/.test(uid)) {
+    await reply(host, senderId, 'UID 必须是纯数字（Telegram 用户 ID）。');
+    return;
+  }
+
+  if (action === 'add') {
+    if (r.cfg.adminUids.includes(uid)) {
+      await reply(host, senderId, `${uid} 已经是 @${r.cfg.botUsername} 的管理员。`);
+      return;
+    }
+    r.cfg.adminUids = [...r.cfg.adminUids, uid];
+    await putStored(env.nfd, r.botId, r.cfg);
+    await reply(
+      host,
+      senderId,
+      `已添加管理员 ${uid}。当前 ${r.cfg.adminUids.length} 人。`,
+    );
+    return;
+  }
+
+  // action === 'remove'
+  if (uid === r.cfg.ownerUid) {
+    await reply(
+      host,
+      senderId,
+      '不能移除 owner。如需转移所有权请 /delete 后由新 owner 重新 onboard。',
+    );
+    return;
+  }
+  if (!r.cfg.adminUids.includes(uid)) {
+    await reply(host, senderId, `${uid} 不在 @${r.cfg.botUsername} 的管理员列表中。`);
+    return;
+  }
+  r.cfg.adminUids = r.cfg.adminUids.filter((u) => u !== uid);
+  await putStored(env.nfd, r.botId, r.cfg);
+  await reply(
+    host,
+    senderId,
+    `已移除管理员 ${uid}。当前 ${r.cfg.adminUids.length} 人。`,
+  );
+}
+
+const START_MESSAGE_MAX = 1000;
+
+async function handleStartMessage(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+  isHost: boolean,
+): Promise<void> {
+  const m = args.match(/^(\S+)\s+([\s\S]+)$/);
+  if (!m) {
+    await reply(
+      host,
+      senderId,
+      `用法：/start_message <bot_username> <文案>\n（支持多行，最长 ${START_MESSAGE_MAX} 字符）`,
+    );
+    return;
+  }
+  const [, username, contentRaw] = m;
+  const content = contentRaw.trim();
+  if (content.length === 0) {
+    await reply(host, senderId, '文案不能为空。');
+    return;
+  }
+  if (content.length > START_MESSAGE_MAX) {
+    await reply(
+      host,
+      senderId,
+      `文案过长（${content.length} > 上限 ${START_MESSAGE_MAX} 字符）。`,
+    );
+    return;
+  }
+
+  const r = await resolveStored(env, username, senderId, isHost);
+  if (typeof r === 'string') {
+    await reply(host, senderId, r);
+    return;
+  }
+
+  r.cfg.startMessage = content;
+  await putStored(env.nfd, r.botId, r.cfg);
+  await reply(
+    host,
+    senderId,
+    `@${r.cfg.botUsername} 的 /start 文案已更新（${content.length} 字符）。`,
+  );
+}
+
+async function handleHostDisable(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+): Promise<void> {
+  const r = await resolveStored(env, args, senderId, true);
+  if (typeof r === 'string') {
+    await reply(host, senderId, r);
+    return;
+  }
+
+  const encKey = await getEncKey(host.masterEncKey);
+  const token = await decryptToken(r.cfg, encKey);
+  try {
+    await tg.deleteWebhook(token);
+  } catch (e) {
+    if (!(e instanceof TelegramError)) throw e;
+  }
+  r.cfg.paused = true;
+  await putStored(env.nfd, r.botId, r.cfg);
+  await reply(
+    host,
+    senderId,
+    `@${r.cfg.botUsername} 已被 host 暂停（owner ${r.cfg.ownerUid}）。`,
+  );
+  logEvent(host.debug, 'host_disabled', { botId: r.botId, owner: r.cfg.ownerUid });
+}
+
+async function handleHostPurge(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+): Promise<void> {
+  const parts = args.split(/\s+/).filter(Boolean);
+  const username = parts[0];
+  const yes = parts.includes('--yes');
+  if (!username) {
+    await reply(host, senderId, '用法：/host_purge <bot_username> --yes');
+    return;
+  }
+
+  const r = await resolveStored(env, username, senderId, true);
+  if (typeof r === 'string') {
+    await reply(host, senderId, r);
+    return;
+  }
+
+  if (!yes) {
+    await reply(
+      host,
+      senderId,
+      `确认强制删除 @${r.cfg.botUsername}（owner ${r.cfg.ownerUid}）？将注销 webhook 并清除全部数据，不可撤销。\n如确认：/host_purge ${r.cfg.botUsername} --yes`,
+    );
+    return;
+  }
+
+  const encKey = await getEncKey(host.masterEncKey);
+  const purged = await deleteTenant(env.nfd, r.botId, encKey);
+  await reply(
+    host,
+    senderId,
+    `@${r.cfg.botUsername} 已被 host 删除（清除 ${purged} 个 KV 键，原 owner ${r.cfg.ownerUid}）。`,
+  );
+  logEvent(host.debug, 'host_purged', { botId: r.botId, owner: r.cfg.ownerUid });
 }
