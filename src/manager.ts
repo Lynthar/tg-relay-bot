@@ -16,6 +16,7 @@ import {
 } from './tenant';
 import type { TgMessage, DisplayMode } from './types';
 import { logError, logEvent } from './security';
+import type { KvStore } from './storage';
 
 interface UserState {
   step: 'idle' | 'awaiting_token';
@@ -24,12 +25,12 @@ interface UserState {
 const USER_STATE_TTL = 3600;
 const REPLY_MAX_LEN = 3500;
 
-async function getState(kv: KVNamespace, uid: string): Promise<UserState> {
+async function getState(kv: KvStore, uid: string): Promise<UserState> {
   const s = await kv.get<UserState>(`manager:user-state-${uid}`, { type: 'json' });
   return s ?? { step: 'idle' };
 }
 
-async function setState(kv: KVNamespace, uid: string, state: UserState): Promise<void> {
+async function setState(kv: KvStore, uid: string, state: UserState): Promise<void> {
   await kv.put(`manager:user-state-${uid}`, JSON.stringify(state), {
     expirationTtl: USER_STATE_TTL,
   });

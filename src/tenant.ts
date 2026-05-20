@@ -2,6 +2,7 @@ import { encrypt, decrypt, randomHex } from './crypto';
 import * as tg from './telegram';
 import { TelegramError } from './telegram';
 import type { DisplayMode } from './types';
+import type { KvStore, KvListResult } from './storage';
 
 export interface StoredTenantCfg {
   tokenEnc: string;
@@ -43,21 +44,21 @@ function tenantKey(botId: string): string {
 }
 
 export async function getStored(
-  kv: KVNamespace,
+  kv: KvStore,
   botId: string,
 ): Promise<StoredTenantCfg | null> {
   return kv.get<StoredTenantCfg>(tenantKey(botId), { type: 'json' });
 }
 
 export async function putStored(
-  kv: KVNamespace,
+  kv: KvStore,
   botId: string,
   cfg: StoredTenantCfg,
 ): Promise<void> {
   await kv.put(tenantKey(botId), JSON.stringify(cfg));
 }
 
-export async function deleteStored(kv: KVNamespace, botId: string): Promise<void> {
+export async function deleteStored(kv: KvStore, botId: string): Promise<void> {
   await kv.delete(tenantKey(botId));
 }
 
@@ -89,7 +90,7 @@ async function storedToTenant(
 }
 
 export async function getTenant(
-  kv: KVNamespace,
+  kv: KvStore,
   botId: string,
   encKey: CryptoKey,
 ): Promise<TenantCfg | null> {
@@ -98,7 +99,7 @@ export async function getTenant(
 }
 
 export async function createTenant(
-  kv: KVNamespace,
+  kv: KvStore,
   encKey: CryptoKey,
   args: { token: string; ownerUid: string; botUsername: string; botId: string },
 ): Promise<StoredTenantCfg> {
@@ -119,11 +120,11 @@ export async function createTenant(
   return cfg;
 }
 
-export async function listTenantIds(kv: KVNamespace): Promise<string[]> {
+export async function listTenantIds(kv: KvStore): Promise<string[]> {
   const ids: string[] = [];
   let cursor: string | undefined = undefined;
   for (;;) {
-    const list: KVNamespaceListResult<unknown, string> = await kv.list({
+    const list: KvListResult = await kv.list({
       prefix: 'tenant:',
       cursor,
     });
@@ -138,7 +139,7 @@ export async function listTenantIds(kv: KVNamespace): Promise<string[]> {
   return ids;
 }
 
-export async function listStored(kv: KVNamespace): Promise<StoredEntry[]> {
+export async function listStored(kv: KvStore): Promise<StoredEntry[]> {
   const ids = await listTenantIds(kv);
   const entries = await Promise.all(
     ids.map(async (id) => {
@@ -150,7 +151,7 @@ export async function listStored(kv: KVNamespace): Promise<StoredEntry[]> {
 }
 
 export async function listStoredByOwner(
-  kv: KVNamespace,
+  kv: KvStore,
   ownerUid: string,
 ): Promise<StoredEntry[]> {
   const all = await listStored(kv);
@@ -158,7 +159,7 @@ export async function listStoredByOwner(
 }
 
 export async function findStoredByUsername(
-  kv: KVNamespace,
+  kv: KvStore,
   username: string,
   ownerUid?: string,
 ): Promise<StoredEntry | null> {
@@ -174,7 +175,7 @@ export async function findStoredByUsername(
 }
 
 export async function deleteTenant(
-  kv: KVNamespace,
+  kv: KvStore,
   botId: string,
   encKey: CryptoKey,
 ): Promise<number> {
@@ -190,7 +191,7 @@ export async function deleteTenant(
   let total = 0;
   let cursor: string | undefined = undefined;
   for (;;) {
-    const list: KVNamespaceListResult<unknown, string> = await kv.list({
+    const list: KvListResult = await kv.list({
       prefix: `tenant:${botId}:`,
       cursor,
     });

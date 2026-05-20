@@ -1,6 +1,21 @@
+// Minimal KV contract — any backend satisfying this can drop in for env.nfd.
+export interface KvStore {
+  get(key: string): Promise<string | null>;
+  get<T = unknown>(key: string, options: { type: 'json' }): Promise<T | null>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  delete(key: string): Promise<void>;
+  list(options?: { prefix?: string; cursor?: string }): Promise<KvListResult>;
+}
+
+export interface KvListResult {
+  keys: { name: string }[];
+  list_complete: boolean;
+  cursor?: string;
+}
+
 export class ScopedKV {
   constructor(
-    private inner: KVNamespace,
+    private inner: KvStore,
     private prefix: string,
   ) {}
 
@@ -24,7 +39,7 @@ export class ScopedKV {
     return this.inner.delete(this.prefix + key);
   }
 
-  async list(subPrefix: string = ''): Promise<KVNamespaceListResult<unknown, string>> {
+  async list(subPrefix: string = ''): Promise<KvListResult> {
     return this.inner.list({ prefix: this.prefix + subPrefix });
   }
 }
