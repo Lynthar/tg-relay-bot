@@ -161,6 +161,8 @@ npx wrangler login
 # 3. Create the KV namespace
 npx wrangler kv namespace create nfd
 # Paste the returned id into wrangler.toml at id = "..."
+# ⚠️ The id currently in the file belongs to a previous host; if you don't replace it,
+# you'll be writing into someone else's KV namespace.
 
 # 4. Set the four required secrets
 npx wrangler secret put ENV_MANAGER_BOT_TOKEN   # the manager bot token from above
@@ -181,6 +183,17 @@ curl 'https://tg-relay-bot.<your-subdomain>.workers.dev/admin/registerWebhook?s=
 
 # 7. Open your manager bot in Telegram, send /start, expect a welcome message
 ```
+
+### Deployment troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `wrangler deploy` errors with `KV namespace not found` | The id in `wrangler.toml` wasn't replaced (or replaced wrong) |
+| `/admin/registerWebhook` returns `Not found` | `ENV_ADMIN_SECRET` not set, URL mistyped, or secret contains chars that need URL-encoding |
+| `/admin/registerWebhook` returns 502 with `telegram error` | `ENV_MANAGER_BOT_TOKEN` wrong or revoked |
+| Manager bot ignores `/start` | Webhook never registered (re-run step 6); check `npx wrangler tail` |
+| `/setup` reports `setWebhook 失败` | Worker URL not HTTPS, DNS not yet propagated, or transient network — retry after ~30s |
+| After deploy, Telegram replays old messages | `update_id` dedup TTL is 5 min; replays settle on their own |
 
 ### Secret meaning & rotation policy
 
@@ -321,6 +334,33 @@ npx wrangler delete
 # 3. Delete the KV namespace
 npx wrangler kv namespace delete --binding=nfd
 ```
+
+### Rebuild (tear down and redeploy)
+
+= **full uninstall + the deploy steps again**. If you want to keep some bots, only unbind their webhook instead of deleting the bot in BotFather:
+
+```bash
+# 1a. Unbind webhook for each bot you want to keep (does NOT delete the bot)
+curl "https://api.telegram.org/bot<old bot token>/deleteWebhook"
+
+# 1b. For bots you no longer want, go to BotFather → /mybots → Delete Bot
+
+# 2. Delete the Worker and KV namespace
+npx wrangler delete
+npx wrangler kv namespace delete --binding=nfd
+
+# 3. Follow the "Deploy" steps from the top
+```
+
+Caveats:
+
+1. **The new `ENV_MASTER_ENC_KEY` cannot match the old one** — every old tenant's encrypted token is now garbage; every friend has to `/setup` again
+2. The new KV namespace id is different — **remember to update `wrangler.toml`**
+3. If the Worker name is unchanged, the URL usually stays the same (same subdomain); friends still talk to the same manager bot and won't notice
+
+Just want to rotate one secret without touching Worker / KV? Run `npx wrangler secret put <NAME>` to overwrite. Note: rotating `ENV_MASTER_ENC_KEY` makes **all existing tenant tokens undecryptable**.
+
+Just want to take everything offline temporarily (no data loss)? `/pause` each tenant from the manager bot; `/resume` brings it back.
 
 ---
 

@@ -161,6 +161,7 @@ npx wrangler login
 # 3. 创建 KV namespace
 npx wrangler kv namespace create nfd
 # 把返回的 id 填进 wrangler.toml 里的 id = "..."
+# ⚠️ 仓库里现有的 id 是上一任 host 的；不替换会写入别人的 KV namespace
 
 # 4. 设置 4 个必填 secret
 npx wrangler secret put ENV_MANAGER_BOT_TOKEN   # 上面建的管家 bot token
@@ -181,6 +182,17 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 
 # 7. 在 Telegram 找你的管家 bot 发 /start，应收到欢迎语
 ```
+
+### 部署故障排查
+
+| 症状 | 可能原因 |
+|---|---|
+| `wrangler deploy` 报 `KV namespace not found` | `wrangler.toml` 的 id 没换或换错 |
+| `/admin/registerWebhook` 返回 `Not found` | `ENV_ADMIN_SECRET` 未设、URL 拼错、或 secret 含特殊字符未 URL-encode |
+| `/admin/registerWebhook` 返回 502 with `telegram error` | `ENV_MANAGER_BOT_TOKEN` 错或已被 revoke |
+| Manager bot 不响应 `/start` | webhook 未注册（重跑步骤 6）；`npx wrangler tail` 看错误 |
+| `/setup` 后 `setWebhook 失败` | Worker URL 不是 HTTPS、DNS 还没传播，或网络抖动；通常等 30s 后重试即可 |
+| 部署后 Telegram 重发旧消息洗版 | `update_id` dedup 在 5min TTL 内会去重；过 5 分钟自然停 |
 
 ### Secret 的含义与轮换策略
 
@@ -321,6 +333,33 @@ npx wrangler delete
 # 3. 删 KV namespace
 npx wrangler kv namespace delete --binding=nfd
 ```
+
+### 重建（撤掉重新部署）
+
+= **完全卸载 + 重新走一遍部署**。如果旧 bot 还想继续用，BotFather 那一步只解绑 webhook、不真删 bot：
+
+```bash
+# 1a. 给每个想保留的 bot 解绑 webhook（不删 bot）
+curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
+
+# 1b. 不想保留的 bot 才去 BotFather → /mybots → Delete Bot
+
+# 2. 删 Worker 与 KV
+npx wrangler delete
+npx wrangler kv namespace delete --binding=nfd
+
+# 3. 按上面"部署步骤"从头来一遍
+```
+
+注意：
+
+1. **新生成的 `ENV_MASTER_ENC_KEY` 不可能跟旧的一样**——所有旧 tenant 的加密 token 失效，每个朋友都要重新 `/setup`
+2. 新 KV namespace id 不同——**记得改 `wrangler.toml`**
+3. 如果 Worker 名字不变，URL 通常保持原样（同一 subdomain），朋友们对话的管家 bot 不变、无感
+
+只想换某个 secret 不动 Worker / KV：直接 `npx wrangler secret put <NAME>` 覆盖即可。注意 `ENV_MASTER_ENC_KEY` 换了**所有现有 tenant token 不可解**。
+
+只想暂时下线（不删数据）：在管家 bot 里给每个 tenant `/pause` 即可，`/resume` 恢复。
 
 ---
 
