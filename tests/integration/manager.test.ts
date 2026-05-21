@@ -16,9 +16,17 @@ beforeAll(() => tgMock.install());
 beforeEach(() => tgMock.reset());
 afterAll(() => tgMock.uninstall());
 
-async function sendManagerCmd(senderChatId: number, text: string): Promise<Response> {
+async function sendManagerCmd(
+  senderChatId: number,
+  text: string,
+  languageCode?: string,
+): Promise<Response> {
   const secret = await managerWebhookSecret();
-  return postWebhook(MANAGER_BOT_ID, secret, buildUpdate({ chatId: senderChatId, text }));
+  return postWebhook(
+    MANAGER_BOT_ID,
+    secret,
+    buildUpdate({ chatId: senderChatId, text, languageCode }),
+  );
 }
 
 function lastReplyText(): string {
@@ -169,5 +177,98 @@ describe('/host_disable and /host_purge', () => {
     await flush();
     expect(await getStored(env.nfd, t.botId)).toBeNull();
     expect(lastReplyText()).toMatch(/已被 host 删除/);
+  });
+});
+
+describe('i18n: English locale', () => {
+  it('/admins add emits English confirmation when language_code=en', async () => {
+    const t = await provisionTenant({ botId: '400100', ownerUid: '400100' });
+    await sendManagerCmd(400100, `/admins ${t.cfg.botUsername} add 556001`, 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/Added admin 556001/);
+  });
+
+  it('/admins remove of owner emits English refusal', async () => {
+    const t = await provisionTenant({ botId: '400101', ownerUid: '400101' });
+    await sendManagerCmd(400101, `/admins ${t.cfg.botUsername} remove 400101`, 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/Cannot remove the owner/);
+  });
+
+  it('/admins add with non-numeric uid emits English error', async () => {
+    const t = await provisionTenant({ botId: '400102', ownerUid: '400102' });
+    await sendManagerCmd(400102, `/admins ${t.cfg.botUsername} add notanumber`, 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/UID must be numeric/);
+  });
+
+  it("non-owner gets English not-found message", async () => {
+    const t = await provisionTenant({ botId: '400103', ownerUid: '400103' });
+    await sendManagerCmd(123456, `/admins ${t.cfg.botUsername} add 556002`, 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/not found/);
+  });
+
+  it('/start_message rejects missing body in English', async () => {
+    const t = await provisionTenant({ botId: '400104', ownerUid: '400104' });
+    await sendManagerCmd(400104, `/start_message ${t.cfg.botUsername}`, 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/Usage: \/start_message/);
+  });
+
+  it('/start_message rejects oversized body in English', async () => {
+    const t = await provisionTenant({ botId: '400105', ownerUid: '400105' });
+    const huge = 'a'.repeat(1001);
+    await sendManagerCmd(400105, `/start_message ${t.cfg.botUsername} ${huge}`, 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/too long/);
+  });
+
+  it('/start_message update confirmation in English', async () => {
+    const t = await provisionTenant({ botId: '400106', ownerUid: '400106' });
+    await sendManagerCmd(
+      400106,
+      `/start_message ${t.cfg.botUsername} Welcome to my bot!`,
+      'en',
+    );
+    await flush();
+    expect(lastReplyText()).toMatch(/\/start message updated/);
+  });
+
+  it('/host_disable refuses non-host in English', async () => {
+    const t = await provisionTenant({ botId: '400107', ownerUid: '400107' });
+    await sendManagerCmd(123456, `/host_disable ${t.cfg.botUsername}`, 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/Host-only command/);
+  });
+
+  it('/host_disable host action emits English confirmation', async () => {
+    const t = await provisionTenant({ botId: '400108', ownerUid: '400108' });
+    await sendManagerCmd(Number(HOST_UID), `/host_disable ${t.cfg.botUsername}`, 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/disabled by host/);
+  });
+
+  it('/host_purge --yes emits English confirmation', async () => {
+    const t = await provisionTenant({ botId: '400109', ownerUid: '400109' });
+    await sendManagerCmd(
+      Number(HOST_UID),
+      `/host_purge ${t.cfg.botUsername} --yes`,
+      'en',
+    );
+    await flush();
+    expect(lastReplyText()).toMatch(/purged by host/);
+  });
+
+  it('/help shows the English command list', async () => {
+    await sendManagerCmd(123456, '/help', 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/Manager bot commands:/);
+  });
+
+  it('/whoami stays English-style in both locales (parity check)', async () => {
+    await sendManagerCmd(123456, '/whoami', 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/Your chat id: 123456/);
   });
 });

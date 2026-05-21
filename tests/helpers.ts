@@ -63,6 +63,7 @@ export interface UpdateBuilder {
   text?: string;
   replyToMessageId?: number;
   mediaGroupId?: string;
+  languageCode?: string;
 }
 
 export function buildUpdate(b: UpdateBuilder): TgUpdate {
@@ -79,7 +80,12 @@ export function buildUpdate(b: UpdateBuilder): TgUpdate {
     message: {
       message_id: b.messageId ?? nid(),
       chat: { id: b.chatId, type: 'private' as const },
-      from: { id: fromId, first_name: 'Test', is_bot: false },
+      from: {
+        id: fromId,
+        first_name: 'Test',
+        is_bot: false,
+        ...(b.languageCode !== undefined ? { language_code: b.languageCode } : {}),
+      },
       ...(b.text !== undefined ? { text: b.text } : {}),
       ...(reply ? { reply_to_message: reply } : {}),
       ...(b.mediaGroupId !== undefined ? { media_group_id: b.mediaGroupId } : {}),

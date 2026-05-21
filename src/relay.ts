@@ -11,6 +11,7 @@ import { userKey, isBlocked, checkRateLimit, logEvent, logError } from './securi
 import { handleAdminMessage } from './commands';
 import type { TgMessage } from './types';
 import type { TenantCfg } from './tenant';
+import { localeFromMessage, T } from './i18n';
 
 export async function handleMessage(
   cfg: TenantCfg,
@@ -23,6 +24,7 @@ export async function handleMessage(
   const senderId = String(message.chat.id);
   const text = message.text ?? '';
   const isAdmin = cfg.adminUids.has(senderId);
+  const locale = localeFromMessage(message);
 
   if (text === '/start') {
     await tg.sendMessage(cfg.botToken, { chat_id: message.chat.id, text: cfg.startMessage });
@@ -31,20 +33,20 @@ export async function handleMessage(
   if (text === '/help') {
     await tg.sendMessage(cfg.botToken, {
       chat_id: message.chat.id,
-      text: buildHelpText(isAdmin),
+      text: T.relay.help[locale](isAdmin),
     });
     return;
   }
   if (text === '/whoami') {
     await tg.sendMessage(cfg.botToken, {
       chat_id: message.chat.id,
-      text: `Your chat id: ${message.chat.id}`,
+      text: T.relay.whoami[locale](String(message.chat.id)),
     });
     return;
   }
 
   if (isAdmin) {
-    await handleAdminMessage(cfg, skv, debug, message);
+    await handleAdminMessage(cfg, skv, debug, message, locale);
     return;
   }
 
@@ -62,28 +64,6 @@ export async function handleMessage(
   }
 
   await relayToAdmins(cfg, skv, debug, message, uk);
-}
-
-function buildHelpText(isAdmin: boolean): string {
-  if (isAdmin) {
-    return [
-      '管理员命令：',
-      '/start /help /whoami - 通用',
-      '/status - 查看 bot 运行状态',
-      '',
-      '回复一条转发的消息：',
-      '  发任意内容 → 回复给原发送者',
-      '  发 /block /unblock /checkblock → 屏蔽管理',
-    ].join('\n');
-  }
-  return [
-    '可用命令：',
-    '/start - 欢迎语',
-    '/help - 显示此帮助',
-    '/whoami - 显示你的 Telegram UID',
-    '',
-    '直接发送消息即可联系运营者。',
-  ].join('\n');
 }
 
 async function relayToAdmins(

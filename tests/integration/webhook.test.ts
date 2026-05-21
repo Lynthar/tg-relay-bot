@@ -156,6 +156,29 @@ describe('PLAN item 5: missing msg-map → "不存在映射" notice', () => {
     expect(sendCalls.length).toBe(1);
     expect(String(sendCalls[0].body?.text)).toMatch(/不存在映射/);
   });
+
+  it('English locale: same case emits "no mapping" notice', async () => {
+    const adminUid = 200006;
+    const t = await provisionTenant({ botId: '200006', ownerUid: String(adminUid) });
+
+    const r = await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({
+        chatId: adminUid,
+        fromId: adminUid,
+        text: 'reply to a long-gone msg',
+        replyToMessageId: 999998,
+        languageCode: 'en',
+      }),
+    );
+    expect(r.status).toBe(200);
+    await flush();
+
+    const sendCalls = tgMock.getCallsByMethod('sendMessage');
+    expect(sendCalls.length).toBe(1);
+    expect(String(sendCalls[0].body?.text)).toMatch(/no mapping/);
+  });
 });
 
 describe('media-group tag dedup (tag/hex modes)', () => {
