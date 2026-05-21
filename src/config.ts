@@ -21,6 +21,7 @@ export const RATE_LIMIT_WINDOW_SEC = 60;
 export const RATE_LIMIT_MAX = 5;
 export const MSG_MAP_TTL_SEC = 30 * 24 * 3600;
 export const DEDUP_TTL_SEC = 5 * 60;
+export const MEDIA_GROUP_TAG_TTL_SEC = 60;
 
 export async function parseHostConfig(env: Env): Promise<HostConfig> {
   const required = (n: string, v: string | undefined): string => {

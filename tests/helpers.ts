@@ -62,6 +62,7 @@ export interface UpdateBuilder {
   fromId?: number;
   text?: string;
   replyToMessageId?: number;
+  mediaGroupId?: string;
 }
 
 export function buildUpdate(b: UpdateBuilder): TgUpdate {
@@ -81,6 +82,7 @@ export function buildUpdate(b: UpdateBuilder): TgUpdate {
       from: { id: fromId, first_name: 'Test', is_bot: false },
       ...(b.text !== undefined ? { text: b.text } : {}),
       ...(reply ? { reply_to_message: reply } : {}),
+      ...(b.mediaGroupId !== undefined ? { media_group_id: b.mediaGroupId } : {}),
     },
   };
 }

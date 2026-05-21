@@ -1,4 +1,9 @@
-import { MSG_MAP_TTL_SEC, RATE_LIMIT_WINDOW_SEC, RATE_LIMIT_MAX } from './config';
+import {
+  MSG_MAP_TTL_SEC,
+  RATE_LIMIT_WINDOW_SEC,
+  RATE_LIMIT_MAX,
+  MEDIA_GROUP_TAG_TTL_SEC,
+} from './config';
 import * as tg from './telegram';
 import { TelegramError } from './telegram';
 import { putMsgMap, type MsgMapEntry, type ScopedKV } from './storage';
@@ -105,18 +110,23 @@ async function relayToAdmins(
         await putMsgMap(skv, fwd.message_id, entry, MSG_MAP_TTL_SEC);
       } else {
         const useHtml = cfg.displayMode === 'tag';
-        const tagText = useHtml ? buildRichTag(message, uk) : buildHexTag(message, uk);
-        const tagMsg = await tg.sendMessage(cfg.botToken, {
-          chat_id: adminId,
-          text: tagText,
-          ...(useHtml ? { parse_mode: 'HTML' as const, disable_web_page_preview: true } : {}),
-        });
+        const emitTag = message.media_group_id
+          ? await shouldEmitTag(skv, adminId, message.media_group_id)
+          : true;
+        if (emitTag) {
+          const tagText = useHtml ? buildRichTag(message, uk) : buildHexTag(message, uk);
+          const tagMsg = await tg.sendMessage(cfg.botToken, {
+            chat_id: adminId,
+            text: tagText,
+            ...(useHtml ? { parse_mode: 'HTML' as const, disable_web_page_preview: true } : {}),
+          });
+          await putMsgMap(skv, tagMsg.message_id, entry, MSG_MAP_TTL_SEC);
+        }
         const copied = await tg.copyMessage(cfg.botToken, {
           chat_id: adminId,
           from_chat_id: message.chat.id,
           message_id: message.message_id,
         });
-        await putMsgMap(skv, tagMsg.message_id, entry, MSG_MAP_TTL_SEC);
         await putMsgMap(skv, copied.message_id, entry, MSG_MAP_TTL_SEC);
       }
       logEvent(debug, 'forwarded', { uk, admin: adminId });
@@ -128,6 +138,20 @@ async function relayToAdmins(
       throw e;
     }
   }
+}
+
+// Per-admin dedup of the album-leader tag. Same media_group_id within the TTL emits the tag only
+// once per admin; subsequent items still get copyMessage'd. Race-prone (no SETNX), but the worst
+// case is "one extra tag or one missing tag" — never a data error.
+async function shouldEmitTag(
+  skv: ScopedKV,
+  adminId: string,
+  mediaGroupId: string,
+): Promise<boolean> {
+  const key = `mg-${adminId}-${mediaGroupId}`;
+  if (await skv.getString(key)) return false;
+  await skv.put(key, '1', MEDIA_GROUP_TAG_TTL_SEC);
+  return true;
 }
 
 function buildHexTag(message: TgMessage, uk: string): string {

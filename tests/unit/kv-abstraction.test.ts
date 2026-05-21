@@ -8,6 +8,8 @@ import {
 } from '../../src/storage';
 
 // Reference KvStore impl with no Cloudflare/Miniflare deps — proves the abstraction is portable.
+// Does not simulate cursor pagination (ignores `cursor`, always returns list_complete: true);
+// cursor correctness must be verified against a real backend.
 class InMemoryKvStore implements KvStore {
   private store = new Map<string, { value: string; expiresAt?: number }>();
 

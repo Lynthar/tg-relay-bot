@@ -158,6 +158,113 @@ describe('PLAN item 5: missing msg-map → "不存在映射" notice', () => {
   });
 });
 
+describe('media-group tag dedup (tag/hex modes)', () => {
+  it('tag mode: first item of an album emits a tag, second item skips it', async () => {
+    const t = await provisionTenant({
+      botId: '200010',
+      ownerUid: 'owner-200010',
+      displayMode: 'tag',
+    });
+    const guest = 5560;
+    const album = 'mg-abc-1';
+
+    // Two messages with the same media_group_id arrive as separate updates.
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, mediaGroupId: album }),
+    );
+    await flush();
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, mediaGroupId: album }),
+    );
+    await flush();
+
+    // One tag (sendMessage) for the leader, two copyMessage for both items.
+    expect(tgMock.getCallsByMethod('sendMessage').length).toBe(1);
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(2);
+  });
+
+  it('tag mode: a different album emits its own tag', async () => {
+    const t = await provisionTenant({
+      botId: '200011',
+      ownerUid: 'owner-200011',
+      displayMode: 'tag',
+    });
+    const guest = 5561;
+
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, mediaGroupId: 'mg-A' }),
+    );
+    await flush();
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, mediaGroupId: 'mg-B' }),
+    );
+    await flush();
+
+    expect(tgMock.getCallsByMethod('sendMessage').length).toBe(2);
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(2);
+  });
+
+  it('hex mode: same dedup behavior as tag mode', async () => {
+    const t = await provisionTenant({
+      botId: '200012',
+      ownerUid: 'owner-200012',
+      displayMode: 'hex',
+    });
+    const guest = 5562;
+    const album = 'mg-hex-1';
+
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, mediaGroupId: album }),
+    );
+    await flush();
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, mediaGroupId: album }),
+    );
+    await flush();
+
+    expect(tgMock.getCallsByMethod('sendMessage').length).toBe(1);
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(2);
+  });
+
+  it('native mode: media_group_id has no effect (always forwardMessage)', async () => {
+    const t = await provisionTenant({
+      botId: '200013',
+      ownerUid: 'owner-200013',
+      displayMode: 'native',
+    });
+    const guest = 5563;
+    const album = 'mg-native-1';
+
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, mediaGroupId: album }),
+    );
+    await flush();
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, mediaGroupId: album }),
+    );
+    await flush();
+
+    expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(2);
+    expect(tgMock.getCallsByMethod('sendMessage').length).toBe(0);
+  });
+});
+
 describe('PLAN item 6: non-admin /block is treated as ordinary text', () => {
   it('no block-* key is written; the message is relayed as text', async () => {
     const t = await provisionTenant({ botId: '200006', ownerUid: '700001' });
