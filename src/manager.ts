@@ -40,7 +40,6 @@ async function setState(kv: KvStore, uid: string, state: UserState): Promise<voi
 export async function handleManagerMessage(
   env: Env,
   host: HostConfig,
-  baseUrl: string,
   message: TgMessage,
 ): Promise<void> {
   if (message.chat.type !== 'private') return;
@@ -63,7 +62,7 @@ export async function handleManagerMessage(
       await reply(host, senderId, T.manager.helpText[locale](isHost));
       return;
     }
-    await handleTokenInput(env, host, baseUrl, senderId, text, locale);
+    await handleTokenInput(env, host, senderId, text, locale);
     return;
   }
 
@@ -117,10 +116,10 @@ export async function handleManagerMessage(
       await handleStartMessage(env, host, senderId, args, isHost, locale);
       return;
     case 'pause':
-      await handlePauseResume(env, host, baseUrl, senderId, args, true, isHost, locale);
+      await handlePauseResume(env, host, senderId, args, true, isHost, locale);
       return;
     case 'resume':
-      await handlePauseResume(env, host, baseUrl, senderId, args, false, isHost, locale);
+      await handlePauseResume(env, host, senderId, args, false, isHost, locale);
       return;
     case 'delete':
       await handleDelete(env, host, senderId, args, isHost, locale);
@@ -186,7 +185,6 @@ async function replyChunked(
 async function handleTokenInput(
   env: Env,
   host: HostConfig,
-  baseUrl: string,
   senderId: string,
   token: string,
   locale: Locale,
@@ -238,7 +236,7 @@ async function handleTokenInput(
     botId,
   });
 
-  const target = `${baseUrl}/wh/${botId}`;
+  const target = `${host.publicBaseUrl}/wh/${botId}`;
   try {
     await tg.setWebhook(token, { url: target, secret_token: cfg.webhookSecret });
   } catch (e) {
@@ -355,7 +353,6 @@ async function handleDisplaymode(
 async function handlePauseResume(
   env: Env,
   host: HostConfig,
-  baseUrl: string,
   senderId: string,
   args: string,
   pause: boolean,
@@ -380,7 +377,7 @@ async function handlePauseResume(
     return;
   }
 
-  const target = `${baseUrl}/wh/${r.botId}`;
+  const target = `${host.publicBaseUrl}/wh/${r.botId}`;
   try {
     await tg.setWebhook(token, { url: target, secret_token: r.cfg.webhookSecret });
   } catch (e) {

@@ -1,22 +1,24 @@
-import worker from '../src/index';
+import { buildApp } from '../src/index';
+import { parseHostConfig, type Env } from '../src/config';
 import { getEncKey } from '../src/crypto';
 import { MemoryKvStore } from '../src/kv/memory';
 import { createTenant, putStored, type StoredTenantCfg } from '../src/tenant';
-import type { Env } from '../src/config';
 import type { DisplayMode, TgUpdate } from '../src/types';
 
 export const MANAGER_BOT_ID = '111111';
 export const MANAGER_TOKEN = '111111:test-manager-token-aaaa';
 export const HOST_UID = '999999';
 export const ADMIN_SECRET = 'test-admin-secret';
+export const PUBLIC_BASE_URL = 'https://test.example.com';
 
 // Module-level Env shared across all tests in a worker. Tests use unique botIds /
-// scope prefixes to avoid cross-test interference, matching the prior Miniflare setup.
+// scope prefixes to avoid cross-test interference.
 export const env: Env = {
   nfd: new MemoryKvStore(),
   ENV_MANAGER_BOT_TOKEN: MANAGER_TOKEN,
   ENV_HOST_UID: HOST_UID,
   ENV_MASTER_ENC_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+  ENV_PUBLIC_BASE_URL: PUBLIC_BASE_URL,
   ENV_ADMIN_SECRET: ADMIN_SECRET,
 };
 
@@ -106,26 +108,25 @@ export function buildUpdate(b: UpdateBuilder): TgUpdate {
 }
 
 export function webhookUrl(botId: string): string {
-  return `https://test.example.com/wh/${botId}`;
+  return `${PUBLIC_BASE_URL}/wh/${botId}`;
 }
 
-// Fake ExecutionContext — runs ctx.waitUntil promises as fire-and-forget, the same
-// semantics tests relied on under Miniflare. Tests use `flush()` to let them settle.
-function makeFakeCtx(): ExecutionContext {
-  return {
-    waitUntil(_promise: Promise<unknown>): void {
-      // Promise begins running synchronously; we drop the handle but the Node
-      // event loop keeps executing it. Errors inside are swallowed by the
-      // try/catch inside processManagerUpdate / processTenantUpdate.
-    },
-    passThroughOnException(): void {},
-    props: {},
-  } as unknown as ExecutionContext;
+// Lazy singleton — the Hono app captures env + host at construction; rebuilding
+// per test is unnecessary because env is module-shared.
+let appPromise: ReturnType<typeof buildAppFromEnv> | null = null;
+async function buildAppFromEnv(): Promise<{ fetch: (req: Request) => Promise<Response> }> {
+  const host = await parseHostConfig(env);
+  const app = buildApp({ env, host });
+  return { fetch: (req: Request) => Promise.resolve(app.fetch(req)) };
+}
+function getApp(): Promise<{ fetch: (req: Request) => Promise<Response> }> {
+  if (!appPromise) appPromise = buildAppFromEnv();
+  return appPromise;
 }
 
-async function callWorker(req: Request): Promise<Response> {
-  if (!worker.fetch) throw new Error('worker.fetch is missing');
-  return worker.fetch(req, env, makeFakeCtx());
+async function callApp(req: Request): Promise<Response> {
+  const app = await getApp();
+  return app.fetch(req);
 }
 
 export async function postWebhook(
@@ -140,11 +141,11 @@ export async function postWebhook(
     headers,
     body: JSON.stringify(body),
   });
-  return callWorker(req);
+  return callApp(req);
 }
 
 export async function getWebhook(botId: string): Promise<Response> {
-  return callWorker(new Request(webhookUrl(botId), { method: 'GET' }));
+  return callApp(new Request(webhookUrl(botId), { method: 'GET' }));
 }
 
 // Brief sleep so ctx.waitUntil background work has time to settle before assertions.

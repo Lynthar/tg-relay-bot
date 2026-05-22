@@ -4,21 +4,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "better-sqlite3": "^12.10.0"
+    "@hono/node-server": "^2.0.3",
+    "better-sqlite3": "^12.10.0",
+    "hono": "^4.12.22"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250101.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.19.41",
+    "tsx": "^4.22.3",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.6",
-    "wrangler": "^4.0.0"
+    "vitest": "^4.1.6"
   }
 }
