@@ -10,9 +10,13 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
+  },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.6",
     "@cloudflare/workers-types": "^4.20250101.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20.19.41",
     "typescript": "^5.7.0",
     "vitest": "^4.1.6",
     "wrangler": "^4.0.0"

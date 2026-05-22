@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { env } from 'cloudflare:test';
+import { env } from '../helpers';
 import {
   checkRateLimit,
   clearBlocked,

@@ -1,5 +1,7 @@
+import type { KvStore } from './storage';
+
 export interface Env {
-  nfd: KVNamespace;
+  nfd: KvStore;
   ENV_MANAGER_BOT_TOKEN: string;
   ENV_HOST_UID: string;
   ENV_MASTER_ENC_KEY: string;

@@ -1,12 +1,24 @@
-import { env, SELF } from 'cloudflare:test';
+import worker from '../src/index';
 import { getEncKey } from '../src/crypto';
+import { MemoryKvStore } from '../src/kv/memory';
 import { createTenant, putStored, type StoredTenantCfg } from '../src/tenant';
+import type { Env } from '../src/config';
 import type { DisplayMode, TgUpdate } from '../src/types';
 
 export const MANAGER_BOT_ID = '111111';
 export const MANAGER_TOKEN = '111111:test-manager-token-aaaa';
 export const HOST_UID = '999999';
 export const ADMIN_SECRET = 'test-admin-secret';
+
+// Module-level Env shared across all tests in a worker. Tests use unique botIds /
+// scope prefixes to avoid cross-test interference, matching the prior Miniflare setup.
+export const env: Env = {
+  nfd: new MemoryKvStore(),
+  ENV_MANAGER_BOT_TOKEN: MANAGER_TOKEN,
+  ENV_HOST_UID: HOST_UID,
+  ENV_MASTER_ENC_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+  ENV_ADMIN_SECRET: ADMIN_SECRET,
+};
 
 let cachedManagerSecret: string | null = null;
 export async function managerWebhookSecret(): Promise<string> {
@@ -97,6 +109,25 @@ export function webhookUrl(botId: string): string {
   return `https://test.example.com/wh/${botId}`;
 }
 
+// Fake ExecutionContext — runs ctx.waitUntil promises as fire-and-forget, the same
+// semantics tests relied on under Miniflare. Tests use `flush()` to let them settle.
+function makeFakeCtx(): ExecutionContext {
+  return {
+    waitUntil(_promise: Promise<unknown>): void {
+      // Promise begins running synchronously; we drop the handle but the Node
+      // event loop keeps executing it. Errors inside are swallowed by the
+      // try/catch inside processManagerUpdate / processTenantUpdate.
+    },
+    passThroughOnException(): void {},
+    props: {},
+  } as unknown as ExecutionContext;
+}
+
+async function callWorker(req: Request): Promise<Response> {
+  if (!worker.fetch) throw new Error('worker.fetch is missing');
+  return worker.fetch(req, env, makeFakeCtx());
+}
+
 export async function postWebhook(
   botId: string,
   secret: string | null,
@@ -104,15 +135,16 @@ export async function postWebhook(
 ): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (secret !== null) headers['X-Telegram-Bot-Api-Secret-Token'] = secret;
-  return SELF.fetch(webhookUrl(botId), {
+  const req = new Request(webhookUrl(botId), {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
   });
+  return callWorker(req);
 }
 
 export async function getWebhook(botId: string): Promise<Response> {
-  return SELF.fetch(webhookUrl(botId), { method: 'GET' });
+  return callWorker(new Request(webhookUrl(botId), { method: 'GET' }));
 }
 
 // Brief sleep so ctx.waitUntil background work has time to settle before assertions.
@@ -121,9 +153,9 @@ export function flush(ms = 30): Promise<void> {
 }
 
 // ─── Telegram API mock ───────────────────────────────────────────────────
-// v0.16 of @cloudflare/vitest-pool-workers no longer exposes a `fetchMock`
-// from `cloudflare:test`. Since `SELF` runs in the same isolate as the test,
-// we just patch `globalThis.fetch` ourselves and intercept api.telegram.org.
+// `SELF.fetch` is gone; tests call `worker.fetch` directly. We still need to
+// intercept outbound api.telegram.org calls — same trick as before, patch
+// `globalThis.fetch`.
 export interface TgCall {
   url: string;
   method: string;
