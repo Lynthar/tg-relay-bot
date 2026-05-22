@@ -13,12 +13,12 @@
   "dependencies": {
     "@hono/node-server": "^2.0.3",
     "better-sqlite3": "^12.10.0",
-    "hono": "^4.12.22"
+    "hono": "^4.12.22",
+    "tsx": "^4.22.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.19.41",
-    "tsx": "^4.22.3",
     "typescript": "^5.7.0",
     "vitest": "^4.1.6"
   }

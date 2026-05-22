@@ -1,0 +1,18 @@
+services:
+  bot:
+    build: .
+    image: tg-relay-bot:local
+    container_name: tg-relay-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # SQLite database lives here. Back this up to keep all tenant tokens +
+      # config across redeploys.
+      - ./data:/data
+    ports:
+      # Expose to the host loopback only; terminate TLS in your reverse
+      # proxy (Caddy / Nginx / Traefik) and forward to 127.0.0.1:8080.
+      # If your reverse proxy is another compose service, remove this and
+      # connect via the Docker network instead.
+      - "127.0.0.1:8080:8080"
+    init: true

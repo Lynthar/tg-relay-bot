@@ -131,7 +131,11 @@ dist
 
 todo.md
 
-# Cloudflare Workers / wrangler
+# Docker
+data/
+
+# Legacy Cloudflare Workers (kept so a fresh checkout of an older branch
+# doesn't accidentally commit these files)
 .dev.vars
 .wrangler/
 dist/

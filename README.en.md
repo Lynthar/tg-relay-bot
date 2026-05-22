@@ -2,9 +2,9 @@
 
 [中文](README.md) | **English**
 
-A privacy-focused Telegram message relay bot platform running on Cloudflare Workers. One deployment hosts your own bot plus your friends' bots — friends onboard through Telegram with zero infrastructure to manage.
+A privacy-focused Telegram message relay bot platform deployed via Docker. One deployment hosts your own bot plus your friends' bots — friends onboard through Telegram with zero infrastructure to manage.
 
-> Forked from [LloydAsp/nfd](https://github.com/LloydAsp/nfd) and rewritten as a multi-tenant TypeScript service with a stronger privacy/security model.
+> Forked from [LloydAsp/nfd](https://github.com/LloydAsp/nfd) and rewritten as a multi-tenant TypeScript service. Originally targeted Cloudflare Workers; this branch ships a Node.js + SQLite container instead, with a stronger privacy/security model.
 
 ---
 
@@ -44,12 +44,12 @@ In detail:
 
 ## Key features
 
-- **Lightweight** — single Cloudflare Worker + single KV namespace, zero runtime external dependencies
+- **Lightweight** — single container + one SQLite file, no external services to run
 - **Multi-tenant** — one deployment hosts every bot; friends self-onboard from inside Telegram
-- **Encrypted tokens** — every tenant's bot token is AES-GCM encrypted at rest in KV
-- **Anonymized senders** — guest chatIds are stored in KV as HMAC-SHA256 hashes; even a full KV dump cannot reveal who messaged whom
-- **Hardened webhook surface** — unguessable derived path, mandatory secret_token check, constant-time comparison, `update_id` deduplication, per-guest rate limiting, admin commands gated to reply context
-- **Zero cost** — Cloudflare's free tier covers personal/small-team usage
+- **Encrypted tokens** — every tenant's bot token is AES-GCM encrypted at rest
+- **Anonymized senders** — guest chatIds are stored as HMAC-SHA256 hashes; even a full database dump cannot reveal who messaged whom
+- **Hardened webhook surface** — per-tenant random secret, mandatory secret_token check, constant-time comparison, `update_id` deduplication, per-guest rate limiting, admin commands gated to reply context
+- **Low footprint** — a 1 vCPU / 512 MB RAM VPS comfortably hosts a dozen tenant bots
 
 ## When to use / when not to use
 
@@ -64,32 +64,34 @@ In detail:
 
 | Role | Who | Needs |
 |---|---|---|
-| **Host** | The person who deploys this repo | Cloudflare account + Node.js + this code |
+| **Host** | The person who deploys this repo | A server with Docker + a public HTTPS domain (your reverse proxy fronts the container) |
 | **Friend** | Someone who wants their own bot, invited by host | Just Telegram |
 | **Guest** | Anyone messaging some bot | Just Telegram |
 
 ## Architecture
 
 ```
-                       ┌──────────────────────────────────┐
-                       │  Cloudflare Worker (one codebase)│
- Friend ──manager bot─→│   /wh/{managerBotId}              │── KV (manager:user-state-*)
-                       │     ↓ /setup conversation         │
- Guest ──tenant bot──→ │   /wh/{tenantBotId}               │── KV (tenant:{botId}:*)
-                       │     ↓ relay logic                 │      msg-map / block / rate / dedup
- Friend ←──────────── │     ↓ forwardMessage              │
-                       └──────────────────────────────────┘
+                   ┌─────────────────┐    ┌──────────────────────────────┐
+                   │  Reverse proxy  │    │  Docker container (Node+Hono)│
+ Friend ──tg ─→ ───┤  TLS termination├─→──┤  /wh/{managerBotId}          │── SQLite (/data/db.sqlite)
+                   │  (Caddy/Nginx/  │    │    ↓ /setup conversation     │      manager:* + tenant:{botId}:*
+ Guest  ──tg ─→ ───┤   Traefik...)   ├─→──┤  /wh/{tenantBotId}           │
+                   │                 │    │    ↓ relay logic             │
+ Friend ←─tg ──── ─┤                 │←─── ─    ↓ forwardMessage         │
+                   └─────────────────┘    │  /healthz, /admin/*          │
+                                          └──────────────────────────────┘
 ```
 
 - **Manager bot** (set up once by the host): friends use it to onboard and manage their own bots
 - **Tenant bots** (each friend's): the actual relays
-- Both share one Worker; URL paths distinguish them
+- Both share one container process; URL paths distinguish them
+- **The reverse proxy must terminate TLS** — Telegram requires HTTPS for webhooks, but the container itself only listens on HTTP (port 8080)
 
 ---
 
 ## Friend perspective: how to use
 
-No Cloudflare or code required. Prerequisite: your host has shared their manager bot's username with you (e.g. `@YourHostRelayManagerBot`).
+No server access or code required. Prerequisite: your host has shared their manager bot's username with you (e.g. `@YourHostRelayManagerBot`).
 
 ### First-time onboarding
 
@@ -132,7 +134,7 @@ In the manager bot:
 | `/start_message <bot_username> <text>` | Customize the /start message (multi-line; up to 1000 chars) |
 | `/pause <bot_username>` | Pause (unregister webhook; bot stops receiving) |
 | `/resume <bot_username>` | Resume (re-register webhook) |
-| `/delete <bot_username> --yes` | Delete (unregister webhook + purge all KV) |
+| `/delete <bot_username> --yes` | Delete (unregister webhook + purge all data) |
 
 Without `--yes`, `/delete` only prints a confirmation prompt.
 
@@ -142,70 +144,72 @@ Without `--yes`, `/delete` only prints a confirmation prompt.
 
 ### Prerequisites
 
-1. **Cloudflare account** — sign up at [dash.cloudflare.com](https://dash.cloudflare.com) (free)
-2. **Node.js** — install LTS from [nodejs.org](https://nodejs.org)
-3. **A manager bot** — `/newbot` with [@BotFather](https://t.me/BotFather); recommend a `Manager` suffix to distinguish it from tenant bots; save the token
-4. **Your own Telegram UID** — message [@userinfobot](https://t.me/userinfobot), note the digits after `Id:`
+1. **A server** — Linux usually. 1 vCPU / 512 MB RAM / 5 GB disk is plenty for personal / small-team use
+2. **Docker + Docker Compose** — install per your distro ([official docs](https://docs.docker.com/engine/install/))
+3. **A reverse proxy + HTTPS domain** — Telegram requires HTTPS for webhooks; the container itself only listens on HTTP. Common setups: Caddy (auto-renew certs) / Nginx + certbot / Traefik / Cloudflare Tunnel
+4. **A manager bot** — `/newbot` with [@BotFather](https://t.me/BotFather); recommend a `Manager` suffix to distinguish it from tenant bots; save the token
+5. **Your own Telegram UID** — message [@userinfobot](https://t.me/userinfobot), note the digits after `Id:`
 
 ### Deploy
 
 ```bash
-# 1. Clone & install
+# 1. Clone
 git clone <this repo>
-cd tg-relay-bot
-npm install
+cd tg-relay-bot-docker
 
-# 2. Log in to Cloudflare
-npx wrangler login
+# 2. Prepare env file
+cp .env.example .env
+# Edit .env, fill in:
+#   ENV_MANAGER_BOT_TOKEN  — manager bot token from above
+#   ENV_HOST_UID           — your Telegram UID
+#   ENV_MASTER_ENC_KEY     — generate once with `openssl rand -base64 32`
+#   ENV_PUBLIC_BASE_URL    — your reverse proxy's public HTTPS URL, e.g.
+#                            https://relay.example.com (must be https://, no trailing slash)
+#   ENV_ADMIN_SECRET       — generate once with `openssl rand -hex 32`
 
-# 3. Create the KV namespace
-npx wrangler kv namespace create nfd
-# Paste the returned id into wrangler.toml at id = "..."
-# ⚠️ The id currently in the file belongs to a previous host; if you don't replace it,
-# you'll be writing into someone else's KV namespace.
+# 3. Start the container (first build pulls the image + compiles better-sqlite3, ~1–2 min)
+docker compose up -d
 
-# 4. Set the four required secrets
-npx wrangler secret put ENV_MANAGER_BOT_TOKEN   # the manager bot token from above
-npx wrangler secret put ENV_HOST_UID            # your Telegram UID
-npx wrangler secret put ENV_MASTER_ENC_KEY      # openssl rand -base64 32
-npx wrangler secret put ENV_ADMIN_SECRET        # openssl rand -hex 32
+# 4. Configure your reverse proxy to terminate TLS for ENV_PUBLIC_BASE_URL and forward to 127.0.0.1:8080
+#    Caddyfile example:
+#       relay.example.com {
+#           reverse_proxy 127.0.0.1:8080
+#       }
 
-# (optional) enable debug logging
-npx wrangler secret put ENV_DEBUG               # type "1"
+# 5. Register the manager bot's webhook (after the container is up and reverse proxy is in place)
+curl "https://relay.example.com/admin/registerWebhook?s=<ENV_ADMIN_SECRET>"
+# Should return: manager webhook registered at https://relay.example.com/wh/<managerBotId>
 
-# 5. Deploy
-npx wrangler deploy
-# Outputs e.g. https://tg-relay-bot.<your-subdomain>.workers.dev
-
-# 6. Register the manager bot's webhook
-curl 'https://tg-relay-bot.<your-subdomain>.workers.dev/admin/registerWebhook?s=<ENV_ADMIN_SECRET>'
-# Should return: manager webhook registered at https://.../wh/<managerBotId>
-
-# 7. Open your manager bot in Telegram, send /start, expect a welcome message
+# 6. Open your manager bot in Telegram, send /start, expect a welcome message
 ```
 
 ### Deployment troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| `wrangler deploy` errors with `KV namespace not found` | The id in `wrangler.toml` wasn't replaced (or replaced wrong) |
+| Container exits immediately with `fatal: missing env XXX` | A required field in `.env` isn't set |
+| Startup error `fatal: ENV_PUBLIC_BASE_URL must start with https://` | You used `http://` or a bare hostname; must be `https://` |
+| Reverse proxy reports 502 / healthcheck failing | Container not ready yet — `docker compose logs bot` should show `listening on :8080`; or proxy is targeting the wrong upstream port |
 | `/admin/registerWebhook` returns `Not found` | `ENV_ADMIN_SECRET` not set, URL mistyped, or secret contains chars that need URL-encoding |
 | `/admin/registerWebhook` returns 502 with `telegram error` | `ENV_MANAGER_BOT_TOKEN` wrong or revoked |
-| Manager bot ignores `/start` | Webhook never registered (re-run step 6); check `npx wrangler tail` |
-| `/setup` reports `setWebhook 失败` | Worker URL not HTTPS, DNS not yet propagated, or transient network — retry after ~30s |
-| After deploy, Telegram replays old messages | `update_id` dedup TTL is 5 min; replays settle on their own |
+| Manager bot ignores `/start` | Webhook never registered (re-run step 5); `docker compose logs -f bot` |
+| `/setup` reports `setWebhook failed` | Telegram cannot reach the URL behind `ENV_PUBLIC_BASE_URL` (DNS, cert, firewall, Cloudflare proxy, …); sanity-check with `curl -I https://relay.example.com/healthz` |
+| After restart, Telegram replays old messages | `update_id` dedup TTL is 5 min; replays settle on their own |
 
-### Secret meaning & rotation policy
+### Configuration & rotation policy
 
-| Secret | Purpose | When to rotate |
+| Field | Purpose | When to rotate |
 |---|---|---|
-| `ENV_MANAGER_BOT_TOKEN` | Manager bot's identity | When manager bot is reset; redo step 6 after |
+| `ENV_MANAGER_BOT_TOKEN` | Manager bot's identity | When manager bot is reset; redo step 5 after |
 | `ENV_HOST_UID` | Your (host's) Telegram UID | When you change Telegram accounts |
 | `ENV_MASTER_ENC_KEY` | AES key for all tenant tokens at rest | **Never** — rotation makes every tenant unrecoverable |
+| `ENV_PUBLIC_BASE_URL` | Public HTTPS URL the reverse proxy exposes | When you change domains; every tenant must `/pause` then `/resume` to re-register webhook |
 | `ENV_ADMIN_SECRET` | Auth for `/admin/*` endpoints | Whenever you suspect a leak |
 | `ENV_DEBUG` | Toggle debug logging | Off by default |
 
-> ⚠️ `ENV_MASTER_ENC_KEY` is the most sensitive secret in the system. Losing or changing it = all tenant tokens irrecoverable = every tenant must re-`/setup`. Keep an offline backup of the value.
+After editing `.env`, run `docker compose up -d` to restart the container with the new values.
+
+> ⚠️ `ENV_MASTER_ENC_KEY` is the most sensitive secret in the system. Losing or changing it = all tenant tokens irrecoverable = every tenant must re-`/setup`. Keep an offline backup of the value, and back up `./data/db.sqlite` regularly.
 
 ### Onboard yourself as the first friend
 
@@ -290,19 +294,24 @@ Each tenant bot configures this independently; default is `native`. Change via `
 ### Live logs
 
 ```bash
-npx wrangler tail
+docker compose logs -f bot
 ```
 
-Default: only error output. Set `ENV_DEBUG=1` to see structured event flow (still no message content).
+Default: only error output. Set `ENV_DEBUG=1` in `.env` to see structured event flow (still no message content).
 
-### Inspect KV
+### Inspect the database
+
+The state lives in `./data/db.sqlite` on the host. Query it directly with `sqlite3`:
 
 ```bash
-# Top-level overview
-npx wrangler kv key list --binding=nfd
+# List all keys
+sqlite3 ./data/db.sqlite "SELECT key FROM kv ORDER BY key;"
 
 # All keys for one tenant
-npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:"
+sqlite3 ./data/db.sqlite "SELECT key FROM kv WHERE key LIKE 'tenant:<botId>:%' ORDER BY key;"
+
+# msg-map / blocklist counts
+sqlite3 ./data/db.sqlite "SELECT substr(key, 1, instr(key, '-')-1) AS kind, COUNT(*) FROM kv GROUP BY kind;"
 ```
 
 ### Force-purge a tenant (bypass manager bot)
@@ -310,29 +319,46 @@ npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:"
 Normally use `/delete <bot_username> --yes`. If the manager bot is down:
 
 ```bash
-for key in $(npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote | jq -r '.[].name'); do
-  npx wrangler kv key delete --binding=nfd "$key"
-done
+sqlite3 ./data/db.sqlite "DELETE FROM kv WHERE key LIKE 'tenant:<botId>:%';"
 ```
+
+Also `curl https://api.telegram.org/bot<token>/deleteWebhook` to unbind the webhook, otherwise Telegram keeps delivering updates to a tenant that no longer exists.
+
+### Backup / restore
+
+Everything is in one file. Either use SQLite's online backup or stop the container first:
+
+```bash
+# Recommended: online backup, no downtime
+sqlite3 ./data/db.sqlite ".backup ./data/backup-$(date +%F).sqlite"
+
+# Or: stop, copy, restart
+docker compose down
+cp ./data/db.sqlite /path/to/backup/db.sqlite
+docker compose up -d
+```
+
+To restore, replace `./data/db.sqlite` with your backup and `docker compose restart bot`.
 
 ### Upgrade
 
 ```bash
 git pull
-npm install
-npx wrangler deploy
+docker compose build --pull
+docker compose up -d
 ```
 
-No need to re-register webhooks, re-put secrets, or migrate KV.
+No need to re-register webhooks, edit `.env`, or migrate data.
 
 ### Full uninstall
 
 ```bash
 # 1. In Telegram, /mybots in BotFather → delete every bot you created (manager + tenant)
-# 2. Delete the Worker
-npx wrangler delete
-# 3. Delete the KV namespace
-npx wrangler kv namespace delete --binding=nfd
+# 2. Stop the container and wipe data
+docker compose down -v
+rm -rf ./data
+# 3. Remove the image (optional)
+docker image rm tg-relay-bot:local
 ```
 
 ### Rebuild (tear down and redeploy)
@@ -345,22 +371,18 @@ curl "https://api.telegram.org/bot<old bot token>/deleteWebhook"
 
 # 1b. For bots you no longer want, go to BotFather → /mybots → Delete Bot
 
-# 2. Delete the Worker and KV namespace
-npx wrangler delete
-npx wrangler kv namespace delete --binding=nfd
+# 2. Stop the container and wipe data
+docker compose down -v
+rm -rf ./data
 
 # 3. Follow the "Deploy" steps from the top
 ```
 
-Caveats:
+Note: **the new `ENV_MASTER_ENC_KEY` cannot match the old one** — every old tenant's encrypted token is now garbage; every friend has to `/setup` again.
 
-1. **The new `ENV_MASTER_ENC_KEY` cannot match the old one** — every old tenant's encrypted token is now garbage; every friend has to `/setup` again
-2. The new KV namespace id is different — **remember to update `wrangler.toml`**
-3. If the Worker name is unchanged, the URL usually stays the same (same subdomain); friends still talk to the same manager bot and won't notice
+Just want to rotate one field without losing data? Edit `.env` and `docker compose up -d`. Note: rotating `ENV_MASTER_ENC_KEY` makes **all existing tenant tokens undecryptable**.
 
-Just want to rotate one secret without touching Worker / KV? Run `npx wrangler secret put <NAME>` to overwrite. Note: rotating `ENV_MASTER_ENC_KEY` makes **all existing tenant tokens undecryptable**.
-
-Just want to take everything offline temporarily (no data loss)? `/pause` each tenant from the manager bot; `/resume` brings it back.
+Just want to take everything offline temporarily? `docker compose stop bot`; `docker compose start bot` brings it back. Per-tenant: `/pause` / `/resume` in the manager bot.
 
 ---
 
@@ -368,10 +390,9 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 
 ### What we guarantee
 
-- Guest chatIds are stored in KV as HMAC-SHA256 hashes (`userKey`); a KV dump reveals no chatId plaintext (except short-lived msg-map records)
-- Every tenant token is AES-GCM encrypted at rest in KV
-- Webhook URL paths are SHA-256-derived and unguessable
-- Webhook secret is compared in constant time to thwart side-channel attacks
+- Guest chatIds are stored as HMAC-SHA256 hashes (`userKey`); a database dump reveals no chatId plaintext (except short-lived msg-map records)
+- Every tenant token is AES-GCM encrypted at rest in SQLite
+- Each tenant has its own random 32-byte webhook secret; comparisons are constant-time to thwart side-channel attacks
 - Telegram's webhook retries are deduplicated by `update_id`
 - Per-guest rate limit: max 5 messages per 60s; excess silently dropped
 - All admin endpoints require `ENV_ADMIN_SECRET`; invalid → 404
@@ -383,9 +404,10 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 | Who | Sees content | Why |
 |---|---|---|
 | Telegram (the company) | ✅ | Telegram is **not** end-to-end encrypted; bot protocol can't use Secret Chats |
-| Cloudflare | ✅ technically possible | The Worker runs on their edge; TLS terminates at CF |
-| Host (the deployer) | ✅ | `wrangler tail` for logs; KV holds all tenant tokens; inherent cost of multi-tenant hosting |
+| Host (the deployer) | ✅ | `docker logs` for logs; `./data/db.sqlite` holds every tenant's encrypted token; inherent cost of multi-tenant hosting |
+| Reverse proxy / TLS terminator | ✅ technically possible | TLS terminates at the proxy; cleartext is forwarded inside the local network. If the proxy is someone else's (Cloudflare Tunnel etc.), they can see it too. |
 | Anyone with a leaked bot token | ✅ | Token = full access; switching the webhook intercepts all messages |
+| Anyone with `./data/db.sqlite` + `ENV_MASTER_ENC_KEY` | ✅ | Together they decrypt every tenant token |
 | ISPs / on-path observers | ❌ metadata only | TLS encrypted |
 | Other Telegram users | ❌ | Private chats are 1-to-1 |
 
@@ -393,11 +415,14 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 
 - **Host and friend must mutually trust each other** — host can decrypt every tenant's token
 - **Don't host your bot on an untrusted host**
-- Trust in Telegram and Cloudflare are background assumptions of this architecture
+- Trust in Telegram, the IDC hosting your server, and your TLS-terminating proxy are background assumptions of this architecture
+- A compromised server = attacker has `./data/db.sqlite` + the container's `ENV_MASTER_ENC_KEY` = every tenant compromised. Harden the host, lock down SSH, restrict `./data/` permissions to the owner
 
 ---
 
 ## Data retention
+
+The database `./data/db.sqlite` has a single `kv` table with an `expires_at` column. Expired rows are lazily filtered on read and purged by a background timer that runs hourly.
 
 | Data | Retention |
 |---|---|
@@ -406,6 +431,7 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 | `tenant:{botId}:block-{userKey}` | Until `/unblock` |
 | `tenant:{botId}:rate-{userKey}` | TTL 60 seconds |
 | `tenant:{botId}:update-{id}` | TTL 5 minutes |
+| `tenant:{botId}:mg-{adminId}-{mgId}` | TTL 60 seconds |
 | `manager:user-state-{uid}` | TTL 1 hour after inactivity |
 | `manager:dedup-update-{id}` | TTL 5 minutes |
 
@@ -420,19 +446,19 @@ A: All tenants become irrecoverable — this key encrypts every token. Each must
 A: Four possibilities: (a) wrong path; (b) missing/wrong `X-Telegram-Bot-Api-Secret-Token` header; (c) tenant `/pause`d; (d) tenant deleted.
 
 **Q: Manager bot doesn't respond.**
-A: Check `npx wrangler tail`; re-register via `/admin/registerWebhook?s=...`; verify `ENV_MANAGER_BOT_TOKEN` is correct.
+A: Check `docker compose logs -f bot`; re-register via `/admin/registerWebhook?s=...`; verify `ENV_MANAGER_BOT_TOKEN` is correct and that the reverse proxy + DNS are healthy (`curl https://relay.example.com/healthz` should return `{"ok":true}`).
 
 **Q: A friend's tenant bot isn't receiving messages.**
 A: In the manager bot, `/info <their_bot>` → check `status`; if paused, `/resume`; or have the friend re-`/setup`.
 
 **Q: Can friends see each other's bot data?**
-A: No. Tenants are isolated by KV prefix (`tenant:{botId}:`), and only owners can use `/info /pause /...` on their own. Host can `/host_list` to see tenants exist, but message contents are not persisted.
+A: No. Tenants are isolated by key prefix (`tenant:{botId}:`), and only owners can use `/info /pause /...` on their own. Host can `/host_list` to see tenants exist, but message contents are not persisted.
 
-**Q: Is Cloudflare's free tier enough?**
-A: Usually yes. Workers free: 100k requests/day; KV free: 1k writes/day. Each guest message is ~3-4 KV writes. 10 friends × 50 messages/day ≈ 1500-2000 writes — may slightly exceed; if so, Workers Paid ($5/month) gives 1M writes/month.
+**Q: How big a machine do I need?**
+A: 1 vCPU / 512 MB RAM / 5 GB disk is enough for a dozen tenant bots. SQLite's single-writer model handles personal/small-team load fine; if you ever expect hundreds of concurrently-active tenants you should switch to Redis/Postgres — but at that point this whole architecture is the wrong shape anyway.
 
 **Q: How do I run it locally?**
-A: Create `.dev.vars` (gitignored) mirroring all four required secrets, then `npx wrangler dev`.
+A: `cp .env.example .env` and fill it in; `npm install`; `npm run dev` (tsx watch, auto-restarts on file change). SQLite db defaults to `./data/db.sqlite` — wipe and recreate freely. To exercise real webhooks locally, expose the port via ngrok / cloudflared tunnel and set `ENV_PUBLIC_BASE_URL` to the tunnel URL.
 
 **Q: Why does a guest who sends 6+ messages within 60 seconds only see the first 5 reach the admin?**
 A: Rate limiting. Per-guest cap is 5 per 60s; excess is silently dropped (no feedback to attackers).
@@ -442,22 +468,32 @@ A: Rate limiting. Per-guest cap is 5 per 60s; excess is silently dropped (no fee
 ## Development
 
 ```bash
-npm install           # install dependencies
+npm install           # install dependencies (incl. better-sqlite3 native build)
 npm run typecheck     # tsc type check
-npm test              # run the test suite (vitest + @cloudflare/vitest-pool-workers, fully offline)
+npm test              # vitest test suite, fully offline (no Docker needed)
 npm run test:watch    # tests in watch mode
-npm run dev           # local wrangler dev
-npm run deploy        # deploy to Cloudflare
+npm run dev           # tsx watch src/server.ts — auto-restarts on file change
+npm start             # one-shot run of src/server.ts (the prod entry)
 ```
 
-Tests live under `tests/unit/` (pure functions) and `tests/integration/` (webhook, tenant isolation, manager commands).
+Tests live under `tests/unit/` (KV backends, crypto, security, storage) and `tests/integration/` (webhook routing, tenant isolation, manager commands). Integration tests drive the Hono app directly via `app.fetch(new Request(...))` — no HTTP server needed.
+
+The container-side behavior can be reproduced locally too:
+
+```bash
+docker compose build       # build image (~1–2 min first time)
+docker compose up -d       # start
+docker compose logs -f bot # follow logs
+docker compose down        # stop (keeps ./data)
+```
 
 ---
 
 ## Acknowledgments
 
 - [LloydAsp/nfd](https://github.com/LloydAsp/nfd) — the single-tenant single-file version this was forked from
-- Cloudflare Workers + KV — making lightweight zero-ops bot platforms possible
+- Cloudflare Workers + KV — the original Worker version's runtime; the starting point for this repo
+- Hono, @hono/node-server, better-sqlite3 — the Node-side runtime stack
 
 ## License
 

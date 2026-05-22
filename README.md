@@ -2,9 +2,9 @@
 
 **中文** | [English](README.en.md)
 
-一个跑在 Cloudflare Worker 上的 Telegram **双向消息中继 bot 平台**。一份部署可以同时托管你自己 + 朋友们的多个 bot；朋友通过 Telegram 自助 onboard，全程不需要碰 Cloudflare 或代码。
+一个用 Docker 部署的 Telegram **双向消息中继 bot 平台**。一份部署可以同时托管你自己 + 朋友们的多个 bot；朋友通过 Telegram 自助 onboard，全程不需要碰服务器或代码。
 
-> Fork 自 [LloydAsp/nfd](https://github.com/LloydAsp/nfd)，重写为多租户架构，强化隐私与安全模型。
+> Fork 自 [LloydAsp/nfd](https://github.com/LloydAsp/nfd)，重写为多租户架构，从 Cloudflare Worker 迁移到 Node.js + SQLite 容器化部署，强化隐私与安全模型。
 
 ---
 
@@ -44,12 +44,12 @@
 
 ## 核心特性
 
-- **轻量** — 单 Cloudflare Worker + 单 KV namespace，零运行时外部依赖
+- **轻量** — 单容器 + 一个 SQLite 文件，零外部服务依赖
 - **多租户** — 一次部署托管所有 bot；朋友在 Telegram 内自助 onboard
-- **token 加密** — 所有 tenant 的 bot token 在 KV 中以 AES-GCM 加密存储
-- **访客匿名化** — 访客 chatId 在 KV 中以 HMAC-SHA256 哈希形式存储；dump KV 也无法还原"是谁联系过谁"
+- **token 加密** — 所有 tenant 的 bot token 以 AES-GCM 加密存储在 SQLite 中
+- **访客匿名化** — 访客 chatId 在数据库里以 HMAC-SHA256 哈希形式存储；dump 数据库也无法还原"是谁联系过谁"
 - **安全收紧** — webhook 路径不可猜、强制 secret_token 校验、constant-time 比较、`update_id` 去重、限速、admin 命令必须 reply 转发消息
-- **零成本** — Cloudflare 免费档对个人/小团队完全够用
+- **资源占用低** — 一台 1 vCPU / 512 MB RAM 的 VPS 跑十几个 tenant bot 完全够用
 
 ## 适用与不适用场景
 
@@ -64,32 +64,34 @@
 
 | 角色 | 是谁 | 需要什么 |
 |---|---|---|
-| **Host** | 部署本仓库的人 | Cloudflare 账号 + Node.js + 仓库代码 |
+| **Host** | 部署本仓库的人 | 一台带 Docker 的服务器 + 一个公网 HTTPS 域名（反代到容器即可） |
 | **Friend** | 想拥有自己 bot 的人，由 host 邀请 | 仅需 Telegram |
 | **Guest** | 给某个 bot 发消息的任何人 | 仅需 Telegram |
 
 ## 架构概览
 
 ```
-                       ┌──────────────────────────────────┐
-                       │  Cloudflare Worker（一份代码）    │
- Friend ──manager bot─→│   /wh/{managerBotId}              │── KV (manager:user-state-*)
-                       │     ↓ /setup 多轮对话             │
- Guest ──tenant bot──→ │   /wh/{tenantBotId}               │── KV (tenant:{botId}:*)
-                       │     ↓ relay 转发                  │      msg-map / block / rate / dedup
- Friend ←──────────── │     ↓ forwardMessage              │
-                       └──────────────────────────────────┘
+                   ┌─────────────────┐    ┌──────────────────────────────┐
+                   │  反代            │    │  Docker 容器 (Node + Hono)   │
+ Friend ──tg ─→ ───┤  TLS 终止        ├─→──┤  /wh/{managerBotId}          │── SQLite (/data/db.sqlite)
+                   │  (Caddy/Nginx/   │    │    ↓ /setup 多轮对话         │      manager:* + tenant:{botId}:*
+ Guest  ──tg ─→ ───┤   Traefik...)    ├─→──┤  /wh/{tenantBotId}           │
+                   │                  │    │    ↓ relay 转发              │
+ Friend ←─tg ──── ─┤                  │←─── ─    ↓ forwardMessage         │
+                   └─────────────────┘    │  /healthz, /admin/*          │
+                                          └──────────────────────────────┘
 ```
 
 - **管家 bot**（host 一次性建好）：朋友通过它 onboard 与管理自己的 bot
 - **Tenant bot**（朋友各自的）：实际承担"双向消息中继"工作
-- 二者共用同一个 Worker，URL 路径区分
+- 二者共用同一个容器进程，URL 路径区分
+- **反代必须做 TLS 终止** —— Telegram webhook 强制 HTTPS，但容器自身只监听 HTTP（端口 8080）
 
 ---
 
 ## Friend 视角：怎么使用
 
-完全不需要 Cloudflare 或代码。前提：你的 host 已经把管家 bot 的用户名告诉你（如 `@YourHostRelayManagerBot`）。
+完全不需要碰服务器或代码。前提：你的 host 已经把管家 bot 的用户名告诉你（如 `@YourHostRelayManagerBot`）。
 
 ### 第一次接入
 
@@ -132,7 +134,7 @@
 | `/start_message <bot_username> <文案>` | 改 /start 文案（支持多行；最长 1000 字符） |
 | `/pause <bot_username>` | 暂停（注销 webhook，bot 不再接收消息） |
 | `/resume <bot_username>` | 恢复（重新注册 webhook） |
-| `/delete <bot_username> --yes` | 删除（注销 webhook + 清所有 KV） |
+| `/delete <bot_username> --yes` | 删除（注销 webhook + 清所有数据） |
 
 `/delete` 不带 `--yes` 只会提示确认，加上才真删。
 
@@ -142,69 +144,71 @@
 
 ### 准备
 
-1. **Cloudflare 账号**：[dash.cloudflare.com](https://dash.cloudflare.com) 注册（免费）
-2. **Node.js**：[nodejs.org](https://nodejs.org) LTS 版
-3. **管家 bot**：去 [@BotFather](https://t.me/BotFather) `/newbot`，建议名字带 `Manager` 后缀以与 tenant bot 区分，保存 token
-4. **你自己的 Telegram UID**：找 [@userinfobot](https://t.me/userinfobot) 发任意消息，记下 `Id:` 后面的数字
+1. **一台服务器** —— Linux 居多。1 vCPU / 512 MB RAM / 5 GB 磁盘对个人/小团队足够
+2. **Docker + Docker Compose** —— 跟 distro 一致的安装方式（[官方文档](https://docs.docker.com/engine/install/)）
+3. **一个反代 + HTTPS 域名** —— Telegram webhook 强制 HTTPS，容器自身只听 HTTP。常见组合：Caddy（自动签证书）/ Nginx + certbot / Traefik / Cloudflare Tunnel
+4. **管家 bot** —— 去 [@BotFather](https://t.me/BotFather) `/newbot`，建议名字带 `Manager` 后缀以与 tenant bot 区分，保存 token
+5. **你自己的 Telegram UID** —— 找 [@userinfobot](https://t.me/userinfobot) 发任意消息，记下 `Id:` 后面的数字
 
 ### 部署步骤
 
 ```bash
-# 1. 克隆并装依赖
+# 1. 克隆
 git clone <this repo>
-cd tg-relay-bot
-npm install
+cd tg-relay-bot-docker
 
-# 2. 登录 Cloudflare
-npx wrangler login
+# 2. 准备 env 文件
+cp .env.example .env
+# 编辑 .env，填入：
+#   ENV_MANAGER_BOT_TOKEN  — 上面建的管家 bot token
+#   ENV_HOST_UID           — 你的 Telegram UID
+#   ENV_MASTER_ENC_KEY     — 运行 `openssl rand -base64 32` 一次得到
+#   ENV_PUBLIC_BASE_URL    — 反代对外的 HTTPS URL，如 https://relay.example.com（必须 https://，不带尾斜杠）
+#   ENV_ADMIN_SECRET       — 运行 `openssl rand -hex 32` 一次得到
 
-# 3. 创建 KV namespace
-npx wrangler kv namespace create nfd
-# 把返回的 id 填进 wrangler.toml 里的 id = "..."
-# ⚠️ 仓库里现有的 id 是上一任 host 的；不替换会写入别人的 KV namespace
+# 3. 启动容器（首次构建会拉镜像 + 编译 better-sqlite3，约 1-2 分钟）
+docker compose up -d
 
-# 4. 设置 4 个必填 secret
-npx wrangler secret put ENV_MANAGER_BOT_TOKEN   # 上面建的管家 bot token
-npx wrangler secret put ENV_HOST_UID            # 你的 Telegram UID
-npx wrangler secret put ENV_MASTER_ENC_KEY      # openssl rand -base64 32
-npx wrangler secret put ENV_ADMIN_SECRET        # openssl rand -hex 32
+# 4. 配反代，把 ENV_PUBLIC_BASE_URL 对应的域名 TLS 终止后转发到 127.0.0.1:8080
+#    Caddyfile 示例：
+#       relay.example.com {
+#           reverse_proxy 127.0.0.1:8080
+#       }
 
-# （可选）开 debug 日志
-npx wrangler secret put ENV_DEBUG               # 输入 1
+# 5. 注册管家 bot 的 webhook（容器起来 + 反代就位后）
+curl "https://relay.example.com/admin/registerWebhook?s=<ENV_ADMIN_SECRET>"
+# 应返回：manager webhook registered at https://relay.example.com/wh/<管家botId>
 
-# 5. 部署
-npx wrangler deploy
-# 输出形如：https://tg-relay-bot.<你的子域>.workers.dev
-
-# 6. 注册管家 bot 的 webhook
-curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<ENV_ADMIN_SECRET>'
-# 应返回：manager webhook registered at https://.../wh/<管家botId>
-
-# 7. 在 Telegram 找你的管家 bot 发 /start，应收到欢迎语
+# 6. 在 Telegram 找你的管家 bot 发 /start，应收到欢迎语
 ```
 
 ### 部署故障排查
 
 | 症状 | 可能原因 |
 |---|---|
-| `wrangler deploy` 报 `KV namespace not found` | `wrangler.toml` 的 id 没换或换错 |
+| 容器启动后立刻退出 + 日志 `fatal: missing env XXX` | `.env` 里某个必填字段没填 |
+| 启动报 `fatal: ENV_PUBLIC_BASE_URL must start with https://` | 填了 `http://` 或裸 hostname；必须 `https://` |
+| 反代收到 502 / 容器健康检查失败 | 容器还没起完，`docker compose logs bot` 看 `listening on :8080`；或反代回源端口错了 |
 | `/admin/registerWebhook` 返回 `Not found` | `ENV_ADMIN_SECRET` 未设、URL 拼错、或 secret 含特殊字符未 URL-encode |
-| `/admin/registerWebhook` 返回 502 with `telegram error` | `ENV_MANAGER_BOT_TOKEN` 错或已被 revoke |
-| Manager bot 不响应 `/start` | webhook 未注册（重跑步骤 6）；`npx wrangler tail` 看错误 |
-| `/setup` 后 `setWebhook 失败` | Worker URL 不是 HTTPS、DNS 还没传播，或网络抖动；通常等 30s 后重试即可 |
-| 部署后 Telegram 重发旧消息洗版 | `update_id` dedup 在 5min TTL 内会去重；过 5 分钟自然停 |
+| `/admin/registerWebhook` 返回 502 + `telegram error` | `ENV_MANAGER_BOT_TOKEN` 错或已被 revoke |
+| Manager bot 不响应 `/start` | webhook 未注册（重跑步骤 5）；`docker compose logs -f bot` 看错误 |
+| `/setup` 后 `setWebhook 失败` | `ENV_PUBLIC_BASE_URL` 对应的 HTTPS 域名 Telegram 访问不到（DNS、证书、防火墙、Cloudflare proxy 等），单独 `curl -I https://relay.example.com/healthz` 自测 |
+| 重启后 Telegram 重发旧消息洗版 | `update_id` dedup 在 5min TTL 内会去重；过 5 分钟自然停 |
 
 ### Secret 的含义与轮换策略
 
-| Secret | 作用 | 何时换 |
+| 字段 | 作用 | 何时换 |
 |---|---|---|
-| `ENV_MANAGER_BOT_TOKEN` | 管家 bot 的身份 | 管家 bot 重置时；换后需重跑步骤 6 |
+| `ENV_MANAGER_BOT_TOKEN` | 管家 bot 的身份 | 管家 bot 重置时；换后需重跑步骤 5 |
 | `ENV_HOST_UID` | 你（host）的 Telegram UID | 你换 Telegram 账号时 |
 | `ENV_MASTER_ENC_KEY` | 加密所有 tenant token 的 AES key | **永远不要换**——换了所有 tenant 全部失效 |
+| `ENV_PUBLIC_BASE_URL` | 反代对外的 HTTPS URL | 换域名时；换后所有 tenant 要 `/pause` 再 `/resume` 重新注册 webhook |
 | `ENV_ADMIN_SECRET` | 鉴权 `/admin/*` 端点 | 怀疑泄漏时随时可换 |
 | `ENV_DEBUG` | 是否开调试日志 | 默认不设 |
 
-> ⚠️ `ENV_MASTER_ENC_KEY` 是整个系统中最敏感的 secret。它丢失或被改 = 所有租户 token 不可恢复 = 全平台需要每个 tenant 重新 `/setup`。建议把生成出来的值额外做一份离线备份。
+改完 `.env` 后跑 `docker compose up -d` 重启容器即可生效。
+
+> ⚠️ `ENV_MASTER_ENC_KEY` 是整个系统中最敏感的密钥。它丢失或被改 = 所有租户 token 不可恢复 = 全平台需要每个 tenant 重新 `/setup`。建议把生成出来的值另做一份离线备份；同时定期备份 `./data/db.sqlite`。
 
 ### 把你自己也当作 friend
 
@@ -289,49 +293,71 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 ### 看实时日志
 
 ```bash
-npx wrangler tail
+docker compose logs -f bot
 ```
 
-默认只在错误时输出。设 `ENV_DEBUG=1` 后可见结构化事件流（不含消息内容）。
+默认只在错误时输出。`.env` 里设 `ENV_DEBUG=1` 后可见结构化事件流（不含消息内容）。
 
-### 查看 KV 数据
+### 查看数据库内容
+
+数据库是宿主机 `./data/db.sqlite`，可以直接用 sqlite3 命令查：
 
 ```bash
-# 列所有 key（看大致状态）
-npx wrangler kv key list --binding=nfd
+# 列所有 key
+sqlite3 ./data/db.sqlite "SELECT key FROM kv ORDER BY key;"
 
-# 看某个 tenant 的全部 key
-npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:"
+# 某个 tenant 的所有 key
+sqlite3 ./data/db.sqlite "SELECT key FROM kv WHERE key LIKE 'tenant:<botId>:%' ORDER BY key;"
+
+# 统计 msg-map / 黑名单条数
+sqlite3 ./data/db.sqlite "SELECT substr(key, 1, instr(key, '-')-1) AS kind, COUNT(*) FROM kv GROUP BY kind;"
 ```
 
 ### 强制清除某个 tenant（绕过管家 bot）
 
-正常请走 `/delete <bot_username> --yes`。如果管家 bot 不可用：
+正常请走管家 bot 的 `/delete <bot_username> --yes`。如果管家 bot 不可用：
 
 ```bash
-for key in $(npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote | jq -r '.[].name'); do
-  npx wrangler kv key delete --binding=nfd "$key"
-done
+sqlite3 ./data/db.sqlite "DELETE FROM kv WHERE key LIKE 'tenant:<botId>:%';"
 ```
+
+记得手动 `curl https://api.telegram.org/bot<token>/deleteWebhook` 解绑 webhook，否则 Telegram 会继续向已删除的 tenant 发更新。
+
+### 备份 / 恢复
+
+整个状态在 `./data/db.sqlite` 一个文件里。停容器或 SQLite 在线 backup 任选：
+
+```bash
+# 推荐：在线 backup，不停服务
+sqlite3 ./data/db.sqlite ".backup ./data/backup-$(date +%F).sqlite"
+
+# 或停容器后复制（数据量小、最省事）
+docker compose down
+cp ./data/db.sqlite /path/to/backup/db.sqlite
+docker compose up -d
+```
+
+恢复就是把备份文件还原回 `./data/db.sqlite`，然后 `docker compose restart bot`。
 
 ### 升级到新版本
 
 ```bash
 git pull
-npm install
-npx wrangler deploy
+docker compose build --pull
+docker compose up -d
 ```
 
-不需要重新注册 webhook、不需要重新 put secret、不会丢 KV 数据。
+不需要重新注册 webhook、不需要改 `.env`、不会丢 `./data/db.sqlite`。
 
 ### 完全卸载
 
 ```bash
 # 1. 在 Telegram 找 BotFather 删掉所有 bot（管家 bot + 你建的 tenant bot）
-# 2. 删 Worker
-npx wrangler delete
-# 3. 删 KV namespace
-npx wrangler kv namespace delete --binding=nfd
+# 2. 停容器并删数据
+docker compose down -v
+rm -rf ./data
+# 3. 删镜像（可选）
+docker image rm tg-relay-bot:local
 ```
 
 ### 重建（撤掉重新部署）
@@ -344,22 +370,18 @@ curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
 
 # 1b. 不想保留的 bot 才去 BotFather → /mybots → Delete Bot
 
-# 2. 删 Worker 与 KV
-npx wrangler delete
-npx wrangler kv namespace delete --binding=nfd
+# 2. 停容器 + 删数据
+docker compose down -v
+rm -rf ./data
 
 # 3. 按上面"部署步骤"从头来一遍
 ```
 
-注意：
+注意：**新生成的 `ENV_MASTER_ENC_KEY` 不可能跟旧的一样**——所有旧 tenant 的加密 token 失效，每个朋友都要重新 `/setup`。
 
-1. **新生成的 `ENV_MASTER_ENC_KEY` 不可能跟旧的一样**——所有旧 tenant 的加密 token 失效，每个朋友都要重新 `/setup`
-2. 新 KV namespace id 不同——**记得改 `wrangler.toml`**
-3. 如果 Worker 名字不变，URL 通常保持原样（同一 subdomain），朋友们对话的管家 bot 不变、无感
+只想换某个字段不动数据：编辑 `.env` 后 `docker compose up -d` 重启容器即可。注意 `ENV_MASTER_ENC_KEY` 换了**所有现有 tenant token 不可解**。
 
-只想换某个 secret 不动 Worker / KV：直接 `npx wrangler secret put <NAME>` 覆盖即可。注意 `ENV_MASTER_ENC_KEY` 换了**所有现有 tenant token 不可解**。
-
-只想暂时下线（不删数据）：在管家 bot 里给每个 tenant `/pause` 即可，`/resume` 恢复。
+只想暂时下线（不删数据）：`docker compose stop bot` 即可，`docker compose start bot` 恢复；或在管家 bot 里给单个 tenant `/pause` / `/resume`。
 
 ---
 
@@ -367,10 +389,9 @@ npx wrangler kv namespace delete --binding=nfd
 
 ### 我们能做到的
 
-- 访客 chatId 在 KV 中以 HMAC-SHA256 哈希存储（`userKey`），dump KV 看不到 chatId 明文（除短期 msg-map 之外）
-- 所有 tenant token 用 AES-GCM 加密存储于 KV
-- webhook URL 路径派生自 SHA-256，不可猜
-- webhook secret 校验用 constant-time 比较，防侧信道
+- 访客 chatId 以 HMAC-SHA256 哈希存储（`userKey`），dump 数据库看不到 chatId 明文（除短期 msg-map 之外）
+- 所有 tenant token 用 AES-GCM 加密存储于 SQLite
+- 每个 tenant 的 webhook secret 是独立随机 32 字节，校验用 constant-time 比较防侧信道
 - Telegram 重发的 webhook 自动去重（`update_id`）
 - 每访客 60s 内最多 5 条；超出静默丢弃
 - 所有 admin 端点强制 `ENV_ADMIN_SECRET`，无效一律 404
@@ -382,9 +403,10 @@ npx wrangler kv namespace delete --binding=nfd
 | 谁 | 能看到内容 | 为什么 |
 |---|---|---|
 | Telegram 公司 | ✅ | Telegram **不是** E2E 加密；bot 协议无法用 Secret Chats |
-| Cloudflare | ✅ 技术上可见 | Worker 在他们边缘上运行；TLS 在 CF 终止 |
-| Host（部署方） | ✅ | `wrangler tail` 看日志；KV 里有所有租户 token；多租户托管的固有代价 |
+| Host（部署方） | ✅ | `docker logs` 看日志；`./data/db.sqlite` 含所有租户 token；多租户托管的固有代价 |
+| 反代/TLS 终止层 | ✅ 技术上可见 | TLS 在反代处终止后内部明文转发到容器；如果反代是别人的（Cloudflare Tunnel 等），他们也能看到 |
 | 任何拿到某 bot token 的人 | ✅ | token = 全权；切换 webhook 即可截获所有该 bot 的消息 |
+| 任何拿到 `./data/db.sqlite` + `ENV_MASTER_ENC_KEY` 的人 | ✅ | 两者一起 = 解密所有 tenant token |
 | ISP / 中间网络 | ❌ 仅元数据 | TLS 加密 |
 | 其它 Telegram 用户 | ❌ | 私聊为 1-to-1 |
 
@@ -392,11 +414,14 @@ npx wrangler kv namespace delete --binding=nfd
 
 - **Host 与 Friend 之间需要相互信任**——host 持有所有租户 token 的解密能力
 - **不要在不可信的 host 上托管你的 bot**
-- 你与 Telegram 公司、Cloudflare 公司的信任，是这个架构的前置假设
+- 你与 Telegram 公司、宿主机所在 IDC、TLS 反代提供方的信任，是这个架构的前置假设
+- 服务器被入侵 = 攻击者拿到 `./data/db.sqlite` + 容器里的 `ENV_MASTER_ENC_KEY` = 全部 tenant 沦陷。建议宿主机硬化、限制 SSH、`./data` 目录权限收紧到 owner-only
 
 ---
 
 ## 数据保留
+
+数据库 `./data/db.sqlite` 的 `kv` 表存储所有状态，每行带一个 `expires_at` 列。读到的时候 lazy 检查并删除过期行；后台 timer 每小时跑一次清理。
 
 | 数据 | 保留时长 |
 |---|---|
@@ -405,6 +430,7 @@ npx wrangler kv namespace delete --binding=nfd
 | `tenant:{botId}:block-{userKey}` | 直到 `/unblock` |
 | `tenant:{botId}:rate-{userKey}` | 60 秒后 TTL 过期 |
 | `tenant:{botId}:update-{id}` | 5 分钟后 TTL 过期 |
+| `tenant:{botId}:mg-{adminId}-{mgId}` | 60 秒后 TTL 过期 |
 | `manager:user-state-{uid}` | 1 小时无活动后 TTL 过期 |
 | `manager:dedup-update-{id}` | 5 分钟后 TTL 过期 |
 
@@ -419,19 +445,19 @@ npx wrangler kv namespace delete --binding=nfd
 可能 4 种：(a) URL 不对；(b) `X-Telegram-Bot-Api-Secret-Token` header 缺失或不对；(c) tenant 已 `/pause`；(d) tenant 已删除。
 
 **Q: 管家 bot 不响应怎么办？**
-检查 `npx wrangler tail` 日志；用 `/admin/registerWebhook?s=...` 重新注册；确认 `ENV_MANAGER_BOT_TOKEN` 正确。
+检查 `docker compose logs -f bot` 日志；用 `/admin/registerWebhook?s=...` 重新注册；确认 `ENV_MANAGER_BOT_TOKEN` 正确、反代 + DNS 正常（`curl https://relay.example.com/healthz` 应该返回 `{"ok":true}`）。
 
 **Q: 朋友的 tenant bot 收不到消息？**
 在管家 bot 里 `/info <他的bot>` 看 `status`；如果 paused 就 `/resume`；或让朋友重新 `/setup`。
 
 **Q: 朋友能看到我的 bot 数据吗？**
-不能。每个 tenant 在 KV 内完全隔离（`tenant:{botId}:` 前缀），且只有 owner 自己能用 `/info /pause` 等命令。Host 能用 `/host_list` 看到所有 tenant **存在**，但消息内容并不持久化保存。
+不能。每个 tenant 在数据库内完全隔离（`tenant:{botId}:` 前缀），且只有 owner 自己能用 `/info /pause` 等命令。Host 能用 `/host_list` 看到所有 tenant **存在**，但消息内容并不持久化保存。
 
-**Q: Cloudflare 免费档够用吗？**
-通常够。Workers 免费 10 万请求/天；KV 免费 1000 写入/天。每条访客消息约 3-4 次 KV 写入。10 个朋友 × 每天 50 条 = 1500-2000 写，可能略超；超出后开 Workers Paid（$5/月，1M 写/月）。
+**Q: 一台多大的机器够用？**
+1 vCPU / 512 MB RAM / 5 GB 磁盘的小 VPS 跑十几个 tenant bot 完全够。SQLite 单写者足够应付个人/小团队规模；如果你预期同时有几百号活跃 tenant 高并发写，那应该考虑切到 Redis/Postgres，不过那时你也不该用这套架构了。
 
 **Q: 怎么本地开发？**
-创建 `.dev.vars`（已 gitignore）镜像 4 个必填 secret，然后 `npx wrangler dev`。
+`cp .env.example .env` 填好；`npm install`；`npm run dev`（tsx watch 模式，文件变了自动重启）。SQLite 数据库默认建在 `./data/db.sqlite`，可以删了重来。要本地接通 Telegram webhook 测试，用 ngrok / cloudflared tunnel 暴露到公网，把 `ENV_PUBLIC_BASE_URL` 改成 tunnel URL。
 
 **Q: 为什么访客在 60s 内连发多条只看到前 5 条到达？**
 限速保护：每访客每 60s 最多 5 条。超出的会被静默丢弃，访客不会收到任何提示（避免给攻击者反馈）。
@@ -441,22 +467,32 @@ npx wrangler kv namespace delete --binding=nfd
 ## 开发
 
 ```bash
-npm install           # 装依赖
+npm install           # 装依赖（含 better-sqlite3 原生构建）
 npm run typecheck     # tsc 类型检查
-npm test              # 跑测试套件（vitest + @cloudflare/vitest-pool-workers，本地全离线）
+npm test              # vitest 测试套件，本地全离线（不需要 Docker）
 npm run test:watch    # 测试 watch 模式
-npm run dev           # 本地起 wrangler dev
-npm run deploy        # 部署到 Cloudflare
+npm run dev           # tsx watch src/server.ts，改代码自动重启
+npm start             # 一次性跑 src/server.ts（prod 入口）
 ```
 
-测试位于 `tests/unit/`（纯函数）和 `tests/integration/`（webhook、tenant 隔离、manager 命令）。
+测试位于 `tests/unit/`（KV 实现 / crypto / security / storage）和 `tests/integration/`（webhook 路由、tenant 隔离、manager 命令）。集成测试通过 `app.fetch(new Request(...))` 直接驱动 Hono app，无需起 HTTP server。
+
+容器内部行为同样可以本地复现：
+
+```bash
+docker compose build       # 构建镜像（首次约 1-2 分钟）
+docker compose up -d       # 启动
+docker compose logs -f bot # 跟日志
+docker compose down        # 停（不删 data/）
+```
 
 ---
 
 ## 致谢
 
 - [LloydAsp/nfd](https://github.com/LloydAsp/nfd) — 单租户单文件版本，本仓库的起点
-- Cloudflare Workers + KV — 让一个轻量 bot 平台可以零运维上线
+- Cloudflare Workers + KV — 上游 / Worker 版本的运行环境，本仓库的起点
+- Hono、@hono/node-server、better-sqlite3 —— Node 端的核心运行栈
 
 ## License
 
