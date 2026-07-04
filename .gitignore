@@ -140,3 +140,4 @@ data/
 .wrangler/
 dist/
 wrangler.local.toml
+CLAUDE.md
