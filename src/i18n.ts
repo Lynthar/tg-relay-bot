@@ -48,6 +48,52 @@ export const T = {
       () =>
         'Paste the bot token you got from BotFather (looks like 12345:ABC...).\n/cancel to abort.',
     ),
+    setupNotInvited: bil(
+      () =>
+        '/setup 需要 host 邀请后才能使用。\n发送 /whoami 获取你的 UID，把它告诉 host，请对方执行 /invite 后再试。',
+      () =>
+        '/setup requires an invitation from the host.\nSend /whoami to get your UID, share it with the host, and try again after they run /invite.',
+    ),
+    tenantLimitReached: bil(
+      (max: number) =>
+        `你最多可以 onboard ${max} 个 bot，已达上限。如需更多，请先 /delete 一个或联系 host。`,
+      (max: number) =>
+        `You can onboard at most ${max} bots and you've reached the limit. /delete one first, or contact the host.`,
+    ),
+    inviteUsage: bil(
+      () => '用法：/invite <uid>（对方可发 /whoami 查看自己的 UID）',
+      () => 'Usage: /invite <uid> (they can send /whoami to find their UID)',
+    ),
+    uninviteUsage: bil(
+      () => '用法：/uninvite <uid>',
+      () => 'Usage: /uninvite <uid>',
+    ),
+    invited: bil(
+      (uid: string) => `已邀请 ${uid}，对方现在可以使用 /setup。`,
+      (uid: string) => `Invited ${uid}. They can now use /setup.`,
+    ),
+    alreadyInvited: bil(
+      (uid: string) => `${uid} 已在邀请列表中。`,
+      (uid: string) => `${uid} is already on the invite list.`,
+    ),
+    uninvited: bil(
+      (uid: string) =>
+        `已取消 ${uid} 的邀请（其已 onboard 的 bot 不受影响，需要的话用 /host_purge 处理）。`,
+      (uid: string) =>
+        `Uninvited ${uid} (their existing bots are unaffected; use /host_purge if needed).`,
+    ),
+    notInInviteList: bil(
+      (uid: string) => `${uid} 不在邀请列表中。`,
+      (uid: string) => `${uid} is not on the invite list.`,
+    ),
+    invitesEmpty: bil(
+      () => '邀请列表为空。/invite <uid> 添加。',
+      () => 'Invite list is empty. /invite <uid> to add.',
+    ),
+    invitesHeader: bil(
+      (count: number) => `已邀请的用户 (${count})：`,
+      (count: number) => `Invited users (${count}):`,
+    ),
     unknownNoName: bil(
       () => '未知命令。/help 查看可用命令。',
       () => 'Unknown command. /help to see available commands.',
@@ -65,7 +111,7 @@ export const T = {
         const lines = [
           '管家 bot 命令：',
           '',
-          '/setup - 接入一个新 bot（粘贴 BotFather 给的 token）',
+          '/setup - 接入一个新 bot（粘贴 BotFather 给的 token；需 host 邀请）',
           '/list - 看你拥有的所有 bot',
           '/info <bot_username> - 看某个 bot 的详细信息',
           '/displaymode <bot_username> <native|tag|hex> - 切换显示模式',
@@ -81,9 +127,13 @@ export const T = {
           lines.push(
             '',
             'Host 命令：',
+            '/invite <uid> - 邀请用户使用 /setup',
+            '/uninvite <uid> - 取消邀请',
+            '/invites - 查看邀请列表',
             '/host_list - 列出所有租户',
             '/host_disable <bot_username> - 强制暂停任意 tenant',
             '/host_purge <bot_username> --yes - 强制删除任意 tenant',
+            '/host_migrate - 迁移旧租户（加密 secrets + 刷新 webhook），可重复运行',
           );
         }
         return lines.join('\n');
@@ -92,7 +142,7 @@ export const T = {
         const lines = [
           'Manager bot commands:',
           '',
-          '/setup - onboard a new bot (paste the BotFather token)',
+          '/setup - onboard a new bot (paste the BotFather token; requires a host invite)',
           '/list - list all bots you own',
           '/info <bot_username> - details of a specific bot',
           '/displaymode <bot_username> <native|tag|hex> - switch display mode',
@@ -108,9 +158,13 @@ export const T = {
           lines.push(
             '',
             'Host commands:',
+            '/invite <uid> - allow a user to /setup',
+            '/uninvite <uid> - revoke an invite',
+            '/invites - list invited users',
             '/host_list - list all tenants',
             '/host_disable <bot_username> - force-pause any tenant',
             '/host_purge <bot_username> --yes - force-delete any tenant',
+            '/host_migrate - upgrade legacy tenants (encrypt secrets + refresh webhooks), idempotent',
           );
         }
         return lines.join('\n');
@@ -146,9 +200,13 @@ export const T = {
         '\nTenant record rolled back. Check the network and /setup again.',
     ),
     onboardSuccess: bil(
-      (username: string, senderId: string) =>
+      (username: string, senderId: string, reachable: boolean) =>
         [
           `✅ @${username} 已上线！`,
+          '',
+          reachable
+            ? `✅ 已通过 @${username} 给你发了一条确认消息——访客来信都会出现在那个对话里。`
+            : `⚠️ 重要：@${username} 目前无法给你发消息。请打开 @${username} 点 Start（或解除对它的屏蔽），否则你将收不到任何访客消息！`,
           '',
           '默认配置：',
           `· 管理员：${senderId}（即你）`,
@@ -162,9 +220,13 @@ export const T = {
           '',
           '⚠️ 你刚才发的 token 还在我们的对话里。建议长按那条消息选 "Delete for me and bot" 把它从两端清除。',
         ].join('\n'),
-      (username: string, senderId: string) =>
+      (username: string, senderId: string, reachable: boolean) =>
         [
           `✅ @${username} is now online!`,
+          '',
+          reachable
+            ? `✅ A confirmation message was sent to you via @${username} — guest messages will appear in that chat.`
+            : `⚠️ Important: @${username} cannot message you yet. Open @${username} and press Start (or unblock it), or you will receive no guest messages!`,
           '',
           'Defaults:',
           `· Admin: ${senderId} (you)`,
@@ -178,6 +240,16 @@ export const T = {
           '',
           '⚠️ The token you just sent is still in this chat. Long-press that message and choose "Delete for me and bot" to remove it from both sides.',
         ].join('\n'),
+    ),
+    tenantProbeOwner: bil(
+      () => '✅ 接入完成。访客给这个 bot 发的消息都会转发到这里，直接 reply 即可回复。',
+      () =>
+        '✅ Onboarding complete. Guest messages to this bot will be forwarded here; just reply to answer.',
+    ),
+    tenantProbeAdmin: bil(
+      (username: string) => `你已被添加为 @${username} 的管理员，访客消息将转发到这里。`,
+      (username: string) =>
+        `You have been added as an admin of @${username}; guest messages will be forwarded here.`,
     ),
     listEmpty: bil(
       () => '你还没有 onboard 任何 bot。/setup 开始。',
@@ -266,8 +338,16 @@ export const T = {
       (uid: string, username: string) => `${uid} is already an admin of @${username}.`,
     ),
     adminAdded: bil(
-      (uid: string, count: number) => `已添加管理员 ${uid}。当前 ${count} 人。`,
-      (uid: string, count: number) => `Added admin ${uid}. ${count} total now.`,
+      (uid: string, count: number, username: string, reachable: boolean) =>
+        `已添加管理员 ${uid}。当前 ${count} 人。` +
+        (reachable
+          ? ''
+          : `\n⚠️ 对方还未与 @${username} 对话过——需要先打开该 bot 点 Start 才能收到转发。`),
+      (uid: string, count: number, username: string, reachable: boolean) =>
+        `Added admin ${uid}. ${count} total now.` +
+        (reachable
+          ? ''
+          : `\n⚠️ They haven't talked to @${username} yet — they must open it and press Start to receive forwards.`),
     ),
     cannotRemoveOwner: bil(
       () => '不能移除 owner。如需转移所有权请 /delete 后由新 owner 重新 onboard。',
@@ -313,6 +393,12 @@ export const T = {
       (username: string, ownerUid: string) =>
         `Confirm force-delete @${username} (owner ${ownerUid})? Will unregister the webhook and purge all data; irreversible.\nTo confirm: /host_purge ${username} --yes`,
     ),
+    hostMigrated: bil(
+      (total: number, migrated: number, webhooks: number, failures: number) =>
+        `共 ${total} 个租户：${migrated} 个完成 secrets 加密迁移，${webhooks} 个 webhook 已刷新（allowed_updates 生效）${failures > 0 ? `，${failures} 个刷新失败（token 可能已失效，/host_list 检查）` : ''}。此命令可重复运行。`,
+      (total: number, migrated: number, webhooks: number, failures: number) =>
+        `${total} tenants: ${migrated} had secrets encrypted, ${webhooks} webhooks refreshed (allowed_updates applied)${failures > 0 ? `, ${failures} refresh failures (token may be revoked, check /host_list)` : ''}. Safe to run again.`,
+    ),
     hostPurged: bil(
       (username: string, purged: number, ownerUid: string) =>
         `@${username} 已被 host 删除（清除 ${purged} 个 KV 键，原 owner ${ownerUid}）。`,
@@ -332,6 +418,8 @@ export const T = {
             '管理员命令：',
             '/start /help /whoami - 通用',
             '/status - 查看 bot 运行状态',
+            '/blocklist - 查看被屏蔽的访客',
+            '/unblock <userKey> - 按 userKey 解除屏蔽（无需 reply）',
             '',
             '回复一条转发的消息：',
             '  发任意内容 → 回复给原发送者',
@@ -353,6 +441,8 @@ export const T = {
             'Admin commands:',
             '/start /help /whoami - common',
             '/status - bot runtime status',
+            '/blocklist - list blocked guests',
+            '/unblock <userKey> - unblock by userKey (no reply needed)',
             '',
             'Reply to a forwarded message:',
             '  any content → reply to the original sender',
@@ -373,9 +463,29 @@ export const T = {
   commands: {
     needReply: bil(
       () =>
-        '请先回复一条转发的消息再发送内容；或对转发的消息使用 /block /unblock /checkblock。命令清单见 /help。',
+        '请先回复一条转发的消息再发送内容；或对转发的消息使用 /block /unblock /checkblock。/blocklist 查看屏蔽列表；/unblock <userKey> 可免 reply 解除屏蔽。命令清单见 /help。',
       () =>
-        'Reply to a forwarded message first, or use /block /unblock /checkblock on a forwarded one. See /help for the command list.',
+        'Reply to a forwarded message first, or use /block /unblock /checkblock on a forwarded one. /blocklist shows blocked guests; /unblock <userKey> works without a reply. See /help for the command list.',
+    ),
+    blocklistEmpty: bil(
+      () => '当前没有被屏蔽的访客。',
+      () => 'No blocked guests.',
+    ),
+    blocklistHeader: bil(
+      (count: number, complete: boolean) =>
+        `已屏蔽 ${count}${complete ? '' : '+'} 个访客（/unblock <userKey> 解除）：`,
+      (count: number, complete: boolean) =>
+        `Blocked guests: ${count}${complete ? '' : '+'} (/unblock <userKey> to lift):`,
+    ),
+    unblockUsage: bil(
+      () =>
+        '用法：/unblock <userKey>（32 位十六进制，可从 /blocklist 或屏蔽确认消息复制）；也可以对一条转发消息 reply /unblock。',
+      () =>
+        'Usage: /unblock <userKey> (32 hex chars, copy it from /blocklist or the block confirmation); or reply /unblock to a forwarded message.',
+    ),
+    notBlocked: bil(
+      (uk: string) => `${uk} 未被屏蔽。`,
+      (uk: string) => `${uk} is not blocked.`,
     ),
     noMappingForCommand: bil(
       () => '该转发消息已超出有效期或不存在映射，无法执行该操作。',

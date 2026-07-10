@@ -1,4 +1,10 @@
-import { parseHostConfig, DEDUP_TTL_SEC, type Env, type HostConfig } from './config';
+import {
+  parseHostConfig,
+  ALLOWED_UPDATES,
+  DEDUP_TTL_SEC,
+  type Env,
+  type HostConfig,
+} from './config';
 import { getEncKey } from './crypto';
 import { getTenant, type TenantCfg } from './tenant';
 import { handleMessage as handleTenantMessage } from './relay';
@@ -33,6 +39,7 @@ export default {
         await setWebhook(host.managerBotToken, {
           url: target,
           secret_token: host.managerWebhookSecret,
+          allowed_updates: ALLOWED_UPDATES,
         });
         return new Response(`manager webhook registered at ${target}`);
       });
@@ -142,6 +149,6 @@ async function processTenantUpdate(
     if (await isDuplicateUpdate(skv, update.update_id, DEDUP_TTL_SEC)) return;
     await handleTenantMessage(tenant, skv, host.debug, update.message);
   } catch (e) {
-    logError('tenant_update', e);
+    logError('tenant_update', e, { botId: tenant.botId });
   }
 }

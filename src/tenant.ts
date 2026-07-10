@@ -6,8 +6,13 @@ import type { KvStore, KvListResult } from './storage';
 
 export interface StoredTenantCfg {
   tokenEnc: string;
-  webhookSecret: string;
-  hashSecret: string;
+  // AES-GCM-encrypted at rest (current format).
+  webhookSecretEnc?: string;
+  hashSecretEnc?: string;
+  // Legacy plaintext from records written before encryption-at-rest. Still readable
+  // until the host runs /host_migrate; never written by new code.
+  webhookSecret?: string;
+  hashSecret?: string;
   adminUids: string[];
   ownerUid: string;
   botUsername: string;
@@ -69,6 +74,44 @@ export async function decryptToken(
   return decrypt(cfg.tokenEnc, encKey);
 }
 
+async function storedSecret(
+  enc: string | undefined,
+  legacyPlain: string | undefined,
+  encKey: CryptoKey,
+  what: string,
+): Promise<string> {
+  if (enc) return decrypt(enc, encKey);
+  if (legacyPlain) return legacyPlain;
+  throw new Error(`tenant cfg missing ${what}`);
+}
+
+export async function storedWebhookSecret(
+  cfg: StoredTenantCfg,
+  encKey: CryptoKey,
+): Promise<string> {
+  return storedSecret(cfg.webhookSecretEnc, cfg.webhookSecret, encKey, 'webhookSecret');
+}
+
+// Encrypt any legacy plaintext secrets in place. Returns true if cfg changed
+// (caller persists). Idempotent.
+export async function encryptLegacySecrets(
+  cfg: StoredTenantCfg,
+  encKey: CryptoKey,
+): Promise<boolean> {
+  let changed = false;
+  if (!cfg.hashSecretEnc && cfg.hashSecret) {
+    cfg.hashSecretEnc = await encrypt(cfg.hashSecret, encKey);
+    delete cfg.hashSecret;
+    changed = true;
+  }
+  if (!cfg.webhookSecretEnc && cfg.webhookSecret) {
+    cfg.webhookSecretEnc = await encrypt(cfg.webhookSecret, encKey);
+    delete cfg.webhookSecret;
+    changed = true;
+  }
+  return changed;
+}
+
 async function storedToTenant(
   botId: string,
   raw: StoredTenantCfg,
@@ -78,8 +121,8 @@ async function storedToTenant(
     botId,
     botToken: await decrypt(raw.tokenEnc, encKey),
     botUsername: raw.botUsername,
-    webhookSecret: raw.webhookSecret,
-    hashSecret: raw.hashSecret,
+    webhookSecret: await storedSecret(raw.webhookSecretEnc, raw.webhookSecret, encKey, 'webhookSecret'),
+    hashSecret: await storedSecret(raw.hashSecretEnc, raw.hashSecret, encKey, 'hashSecret'),
     adminUids: new Set(raw.adminUids),
     ownerUid: raw.ownerUid,
     displayMode: raw.displayMode,
@@ -98,16 +141,24 @@ export async function getTenant(
   return raw ? storedToTenant(botId, raw, encKey) : null;
 }
 
+export interface CreatedTenant {
+  cfg: StoredTenantCfg;
+  // Plaintext copies for the caller (webhook registration, tests) — stored only encrypted.
+  webhookSecret: string;
+  hashSecret: string;
+}
+
 export async function createTenant(
   kv: KvStore,
   encKey: CryptoKey,
   args: { token: string; ownerUid: string; botUsername: string; botId: string },
-): Promise<StoredTenantCfg> {
-  const tokenEnc = await encrypt(args.token, encKey);
+): Promise<CreatedTenant> {
+  const webhookSecret = randomHex(32);
+  const hashSecret = randomHex(32);
   const cfg: StoredTenantCfg = {
-    tokenEnc,
-    webhookSecret: randomHex(32),
-    hashSecret: randomHex(32),
+    tokenEnc: await encrypt(args.token, encKey),
+    webhookSecretEnc: await encrypt(webhookSecret, encKey),
+    hashSecretEnc: await encrypt(hashSecret, encKey),
     adminUids: [args.ownerUid],
     ownerUid: args.ownerUid,
     botUsername: args.botUsername,
@@ -117,7 +168,7 @@ export async function createTenant(
     paused: false,
   };
   await putStored(kv, args.botId, cfg);
-  return cfg;
+  return { cfg, webhookSecret, hashSecret };
 }
 
 export async function listTenantIds(kv: KvStore): Promise<string[]> {

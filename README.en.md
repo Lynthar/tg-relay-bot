@@ -45,10 +45,10 @@ In detail:
 ## Key features
 
 - **Lightweight** — single Cloudflare Worker + single KV namespace, zero runtime external dependencies
-- **Multi-tenant** — one deployment hosts every bot; friends self-onboard from inside Telegram
-- **Encrypted tokens** — every tenant's bot token is AES-GCM encrypted at rest in KV
+- **Multi-tenant** — one deployment hosts every bot; friends self-onboard from inside Telegram (after a host `/invite`)
+- **Encryption at rest** — every tenant's bot token, webhook secret, and hashSecret are AES-GCM encrypted in KV
 - **Anonymized senders** — guest chatIds are stored in KV as HMAC-SHA256 hashes; even a full KV dump cannot reveal who messaged whom
-- **Hardened webhook surface** — unguessable derived path, mandatory secret_token check, constant-time comparison, `update_id` deduplication, per-guest rate limiting, admin commands gated to reply context
+- **Hardened webhook surface** — every webhook request must carry a per-tenant random secret_token (constant-time compared), `update_id` deduplication, per-guest rate limiting, admin commands gated to reply context
 - **Zero cost** — Cloudflare's free tier covers personal/small-team usage
 
 ## When to use / when not to use
@@ -93,11 +93,13 @@ No Cloudflare or code required. Prerequisite: your host has shared their manager
 
 ### First-time onboarding
 
-1. Open [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts to pick a name and username, copy the returned token (looks like `12345:ABC...`)
-2. Open the manager bot your host gave you
-3. Send `/setup`, then paste the token from step 1
+1. Open the manager bot your host gave you, send `/whoami`, share the returned UID with your host, and wait until they run `/invite <your UID>`
+2. Open [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts to pick a name and username, copy the returned token (looks like `12345:ABC...`)
+3. Back in the manager bot, send `/setup`, then paste the token from step 2
 4. You should see `✅ @your_bot is live`. Done.
 5. **Important**: long-press the message containing your token → "Delete for me and bot" to wipe it from chat history
+
+Each user can onboard up to 3 bots (the host is exempt).
 
 ### Day-to-day use
 
@@ -115,9 +117,11 @@ In the chat with **your own bot** (not the manager bot):
 | Reply to a forwarded message with `/block` | Block that guest |
 | Reply to a forwarded message with `/unblock` | Unblock |
 | Reply to a forwarded message with `/checkblock` | Show whether blocked |
+| Send `/blocklist` | List blocked guests' userKeys |
+| Send `/unblock <userKey>` | Unblock by userKey (no reply needed) |
 | Send `/status` | Show that bot's stats (msg-map / blocked / rate-limit counts) |
 
-⚠️ `/block` and friends **must be a reply to a forwarded message**. Naked UID arguments are not accepted, to prevent fat-finger blocks.
+⚠️ `/block` **must be a reply to a forwarded message**. Naked UID arguments are not accepted, to prevent fat-finger blocks. Unblocking has one escape hatch: a blocked guest produces no new forwards and old ones expire after 30 days, so use `/unblock <userKey>` (the anonymous hash from `/blocklist`), never a UID.
 
 ### Manage your bots
 
@@ -212,7 +216,7 @@ curl 'https://tg-relay-bot.<your-subdomain>.workers.dev/admin/registerWebhook?s=
 After deploying, the host also goes through the friend flow to get the first outward-facing bot:
 
 1. Use BotFather to create a separate outward-facing relay bot (**not the manager bot**)
-2. In the manager bot, send `/setup`, paste the new bot's token
+2. In the manager bot, send `/setup`, paste the new bot's token (the host needs no invite and is exempt from the tenant cap)
 3. Done
 
 ---
@@ -227,7 +231,7 @@ Available to both friends and host:
 | `/help` | Command list (host sees additional host-only commands) |
 | `/whoami` | Show your Telegram UID |
 | `/cancel` | Reset current conversation state (cancel `/setup`) |
-| `/setup` | Multi-step: paste token → auto-validate → auto-register webhook |
+| `/setup` | Multi-step: paste token → auto-validate → auto-register webhook (requires a host `/invite`; up to 3 bots per user) |
 | `/list` | List bots you own |
 | `/info <bot_username>` | Show details for a bot |
 | `/displaymode <bot_username> <native\|tag\|hex>` | Change display mode |
@@ -241,6 +245,10 @@ Host only:
 
 | Command | Purpose |
 |---|---|
+| `/host_migrate` | Run once after upgrading from an older version: encrypts legacy plaintext secrets and refreshes webhooks; idempotent |
+| `/invite <uid>` | Allow a user to `/setup` (they can find their UID via `/whoami`) |
+| `/uninvite <uid>` | Revoke an invite (existing bots unaffected; use `/host_purge` if needed) |
+| `/invites` | List invited users |
 | `/host_list` | List **all** tenants (including other friends') |
 | `/host_disable <bot_username>` | Forcibly pause any tenant (no ownership required) |
 | `/host_purge <bot_username> --yes` | Forcibly delete any tenant; bare form only prints confirmation |
@@ -267,6 +275,8 @@ For the owner only (i.e. the friend who onboarded this bot):
 | Reply with `/block` | Block that guest |
 | Reply with `/unblock` | Unblock |
 | Reply with `/checkblock` | Show block status |
+| Send `/blocklist` | List blocked guests' userKeys |
+| Send `/unblock <userKey>` | Unblock by userKey (for when the original forward has expired) |
 | Send `/status` | Show stats (msg-map / blocked / rate-limit windows counts) |
 
 Non-admin users sending `/block` etc. → not effective; the message is treated as a normal forward to admin.
@@ -325,6 +335,11 @@ npx wrangler deploy
 
 No need to re-register webhooks, re-put secrets, or migrate KV.
 
+When upgrading from a version that predates `/host_migrate`, do two things after deploying (both idempotent):
+
+1. Re-run `curl 'https://.../admin/registerWebhook?s=<ENV_ADMIN_SECRET>'` — applies `allowed_updates` to the manager bot's webhook
+2. Run `/host_migrate` in the manager bot — encrypts existing tenants' plaintext secrets and refreshes their webhooks
+
 ### Full uninstall
 
 ```bash
@@ -369,14 +384,14 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 ### What we guarantee
 
 - Guest chatIds are stored in KV as HMAC-SHA256 hashes (`userKey`); a KV dump reveals no chatId plaintext (except short-lived msg-map records)
-- Every tenant token is AES-GCM encrypted at rest in KV
-- Webhook URL paths are SHA-256-derived and unguessable
-- Webhook secret is compared in constant time to thwart side-channel attacks
+- Every tenant's token, webhook secret, and hashSecret are AES-GCM encrypted at rest in KV — a KV dump alone (without `ENV_MASTER_ENC_KEY`) cannot brute-force userKeys offline (deployments upgraded from older versions must run `/host_migrate` once)
+- Webhook auth relies on a per-tenant random `secret_token` header (constant-time compared, thwarting side channels), not path secrecy — the botId in the path is public information; a missing or wrong secret gets a uniform 404, unusable for probing whether a bot is hosted here
 - Telegram's webhook retries are deduplicated by `update_id`
 - Per-guest rate limit: max 5 messages per 60s; excess silently dropped
 - All admin endpoints require `ENV_ADMIN_SECRET`; invalid → 404
 - Bot ignores group chats and all update types other than `message` by default
 - Admin commands require replying to a forwarded message; naked UID operations are forbidden
+- Onboarding requires an explicit host `/invite` plus a per-user bot cap — strangers who discover the manager bot cannot attach bots to your deployment
 
 ### What we cannot do
 
@@ -401,13 +416,14 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 
 | Data | Retention |
 |---|---|
-| `tenant:{botId}:cfg` (encrypted token) | Until `/delete --yes` |
-| `tenant:{botId}:msg-map-{id}` | TTL 30 days |
+| `tenant:{botId}:cfg` (encrypted token & secrets) | Until `/delete --yes` |
+| `tenant:{botId}:msg-map-{adminUid}-{id}` | TTL 30 days |
 | `tenant:{botId}:block-{userKey}` | Until `/unblock` |
 | `tenant:{botId}:rate-{userKey}` | TTL 60 seconds |
 | `tenant:{botId}:update-{id}` | TTL 5 minutes |
 | `manager:user-state-{uid}` | TTL 1 hour after inactivity |
 | `manager:dedup-update-{id}` | TTL 5 minutes |
+| `manager:allow-{uid}` (invite list) | Until `/uninvite` |
 
 ---
 

@@ -26,18 +26,19 @@ export async function handleMessage(
   const isAdmin = cfg.adminUids.has(senderId);
   const locale = localeFromMessage(message);
 
-  if (text === '/start') {
+  const cmd = parseCommand(text, cfg.botUsername);
+  if (cmd === 'start') {
     await tg.sendMessage(cfg.botToken, { chat_id: message.chat.id, text: cfg.startMessage });
     return;
   }
-  if (text === '/help') {
+  if (cmd === 'help') {
     await tg.sendMessage(cfg.botToken, {
       chat_id: message.chat.id,
       text: T.relay.help[locale](isAdmin),
     });
     return;
   }
-  if (text === '/whoami') {
+  if (cmd === 'whoami') {
     await tg.sendMessage(cfg.botToken, {
       chat_id: message.chat.id,
       text: T.relay.whoami[locale](String(message.chat.id)),
@@ -66,6 +67,17 @@ export async function handleMessage(
   await relayToAdmins(cfg, skv, debug, message, uk);
 }
 
+// Matches a leading bot command, tolerating a deep-link payload ("/start ref123",
+// how t.me/bot?start=ref123 arrives) and an explicit @botname suffix. A suffix
+// addressed to a DIFFERENT bot returns null so the text falls through to the
+// relay path untouched.
+function parseCommand(text: string, botUsername: string): string | null {
+  const m = text.match(/^\/([A-Za-z0-9_]+)(?:@(\w+))?(?:\s|$)/);
+  if (!m) return null;
+  if (m[2] && m[2].toLowerCase() !== botUsername.toLowerCase()) return null;
+  return m[1].toLowerCase();
+}
+
 async function relayToAdmins(
   cfg: TenantCfg,
   skv: ScopedKV,
@@ -87,7 +99,7 @@ async function relayToAdmins(
           from_chat_id: message.chat.id,
           message_id: message.message_id,
         });
-        await putMsgMap(skv, fwd.message_id, entry, MSG_MAP_TTL_SEC);
+        await putMsgMap(skv, adminId, fwd.message_id, entry, MSG_MAP_TTL_SEC);
       } else {
         const useHtml = cfg.displayMode === 'tag';
         const emitTag = message.media_group_id
@@ -100,19 +112,19 @@ async function relayToAdmins(
             text: tagText,
             ...(useHtml ? { parse_mode: 'HTML' as const, disable_web_page_preview: true } : {}),
           });
-          await putMsgMap(skv, tagMsg.message_id, entry, MSG_MAP_TTL_SEC);
+          await putMsgMap(skv, adminId, tagMsg.message_id, entry, MSG_MAP_TTL_SEC);
         }
         const copied = await tg.copyMessage(cfg.botToken, {
           chat_id: adminId,
           from_chat_id: message.chat.id,
           message_id: message.message_id,
         });
-        await putMsgMap(skv, copied.message_id, entry, MSG_MAP_TTL_SEC);
+        await putMsgMap(skv, adminId, copied.message_id, entry, MSG_MAP_TTL_SEC);
       }
       logEvent(debug, 'forwarded', { uk, admin: adminId });
     } catch (e) {
       if (e instanceof TelegramError) {
-        logError('forward', e);
+        logError('forward', e, { admin: adminId });
         continue;
       }
       throw e;

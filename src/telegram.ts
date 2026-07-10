@@ -78,7 +78,7 @@ export function forwardMessage(
 
 export function setWebhook(
   token: string,
-  params: { url: string; secret_token?: string },
+  params: { url: string; secret_token?: string; allowed_updates?: string[] },
 ): Promise<true> {
   return call<true>(token, 'setWebhook', params);
 }

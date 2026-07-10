@@ -1,4 +1,5 @@
 import type { ScopedKV } from './storage';
+import { TelegramError } from './telegram';
 
 const enc = new TextEncoder();
 
@@ -91,7 +92,35 @@ export function logEvent(
   console.log(parts.join(' '));
 }
 
-export function logError(event: string, err: unknown): void {
-  const name = err instanceof Error ? err.name : 'Unknown';
-  console.error(`error event=${event} name=${name}`);
+// Long digit runs are masked so an error message can never leak a chatId/UID into
+// logs (e.g. V8's JSON SyntaxError quotes a fragment of the offending source).
+function sanitizeForLog(s: string): string {
+  return s.replace(/\d{5,}/g, '<id>').replace(/\s+/g, ' ').slice(0, 200);
+}
+
+export function formatError(
+  event: string,
+  err: unknown,
+  fields: Record<string, string | number> = {},
+): string {
+  const parts = [
+    `error event=${event}`,
+    ...Object.entries(fields).map(([k, v]) => `${k}=${v}`),
+  ];
+  if (err instanceof TelegramError) {
+    parts.push('name=TelegramError', `method=${err.method}`, `detail=${sanitizeForLog(err.detail)}`);
+  } else if (err instanceof Error) {
+    parts.push(`name=${err.name}`, `msg=${sanitizeForLog(err.message)}`);
+  } else {
+    parts.push('name=Unknown');
+  }
+  return parts.join(' ');
+}
+
+export function logError(
+  event: string,
+  err: unknown,
+  fields: Record<string, string | number> = {},
+): void {
+  console.error(formatError(event, err, fields));
 }

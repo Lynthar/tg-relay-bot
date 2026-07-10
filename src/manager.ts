@@ -1,4 +1,4 @@
-import type { Env, HostConfig } from './config';
+import { ALLOWED_UPDATES, MAX_TENANTS_PER_UID, type Env, type HostConfig } from './config';
 import { getEncKey } from './crypto';
 import * as tg from './telegram';
 import { TelegramError } from './telegram';
@@ -8,10 +8,12 @@ import {
   createTenant,
   deleteStored,
   deleteTenant,
+  encryptLegacySecrets,
   listStored,
   listStoredByOwner,
   findStoredByUsername,
   decryptToken,
+  storedWebhookSecret,
   type StoredEntry,
 } from './tenant';
 import type { TgMessage, DisplayMode } from './types';
@@ -29,6 +31,26 @@ const REPLY_MAX_LEN = 3500;
 async function getState(kv: KvStore, uid: string): Promise<UserState> {
   const s = await kv.get<UserState>(`manager:user-state-${uid}`, { type: 'json' });
   return s ?? { step: 'idle' };
+}
+
+// Onboarding allowlist. Only invited UIDs (plus the host) may /setup; everything
+// else on the manager bot stays open so prospective friends can run /whoami.
+const INVITE_PREFIX = 'manager:allow-';
+
+async function isInvited(kv: KvStore, uid: string): Promise<boolean> {
+  return (await kv.get(INVITE_PREFIX + uid)) === '1';
+}
+
+async function listInvited(kv: KvStore): Promise<string[]> {
+  const uids: string[] = [];
+  let cursor: string | undefined = undefined;
+  for (;;) {
+    const page = await kv.list({ prefix: INVITE_PREFIX, cursor });
+    for (const k of page.keys) uids.push(k.name.slice(INVITE_PREFIX.length));
+    if (page.list_complete) break;
+    cursor = page.cursor;
+  }
+  return uids;
 }
 
 async function setState(kv: KvStore, uid: string, state: UserState): Promise<void> {
@@ -85,6 +107,10 @@ export async function handleManagerMessage(
     return;
   }
   if (text === '/setup') {
+    if (!isHost && !(await isInvited(env.nfd, senderId))) {
+      await reply(host, senderId, T.manager.setupNotInvited[locale]());
+      return;
+    }
     await setState(env.nfd, senderId, { step: 'awaiting_token' });
     await reply(host, senderId, T.manager.setupPrompt[locale]());
     return;
@@ -125,6 +151,27 @@ export async function handleManagerMessage(
     case 'delete':
       await handleDelete(env, host, senderId, args, isHost, locale);
       return;
+    case 'invite':
+      if (!isHost) {
+        await reply(host, senderId, T.manager.hostOnly[locale]());
+        return;
+      }
+      await handleInvite(env, host, senderId, args, locale);
+      return;
+    case 'uninvite':
+      if (!isHost) {
+        await reply(host, senderId, T.manager.hostOnly[locale]());
+        return;
+      }
+      await handleUninvite(env, host, senderId, args, locale);
+      return;
+    case 'invites':
+      if (!isHost) {
+        await reply(host, senderId, T.manager.hostOnly[locale]());
+        return;
+      }
+      await handleInvites(env, host, senderId, locale);
+      return;
     case 'host_list':
       if (!isHost) {
         await reply(host, senderId, T.manager.hostOnly[locale]());
@@ -145,6 +192,13 @@ export async function handleManagerMessage(
         return;
       }
       await handleHostPurge(env, host, senderId, args, locale);
+      return;
+    case 'host_migrate':
+      if (!isHost) {
+        await reply(host, senderId, T.manager.hostOnly[locale]());
+        return;
+      }
+      await handleHostMigrate(env, host, baseUrl, senderId, locale);
       return;
     default:
       await reply(host, senderId, T.manager.unknownCmd[locale](cmd));
@@ -191,6 +245,14 @@ async function handleTokenInput(
   token: string,
   locale: Locale,
 ): Promise<void> {
+  // Re-check the invite here, not only at /setup: the awaiting_token state lives up
+  // to an hour, during which the host may have /uninvite'd this user.
+  if (senderId !== host.hostUid && !(await isInvited(env.nfd, senderId))) {
+    await setState(env.nfd, senderId, { step: 'idle' });
+    await reply(host, senderId, T.manager.setupNotInvited[locale]());
+    return;
+  }
+
   const m = token.match(/^(\d+):[A-Za-z0-9_-]+$/);
   if (!m) {
     await reply(host, senderId, T.manager.tokenInvalid[locale]());
@@ -218,6 +280,15 @@ async function handleTokenInput(
     return;
   }
 
+  if (senderId !== host.hostUid) {
+    const owned = await listStoredByOwner(env.nfd, senderId);
+    if (owned.length >= MAX_TENANTS_PER_UID) {
+      await setState(env.nfd, senderId, { step: 'idle' });
+      await reply(host, senderId, T.manager.tenantLimitReached[locale](MAX_TENANTS_PER_UID));
+      return;
+    }
+  }
+
   let me: tg.TgMe;
   try {
     me = await tg.getMe(token);
@@ -231,7 +302,7 @@ async function handleTokenInput(
     return;
   }
 
-  const cfg = await createTenant(env.nfd, encKey, {
+  const created = await createTenant(env.nfd, encKey, {
     token,
     ownerUid: senderId,
     botUsername: me.username,
@@ -240,7 +311,11 @@ async function handleTokenInput(
 
   const target = `${baseUrl}/wh/${botId}`;
   try {
-    await tg.setWebhook(token, { url: target, secret_token: cfg.webhookSecret });
+    await tg.setWebhook(token, {
+      url: target,
+      secret_token: created.webhookSecret,
+      allowed_updates: ALLOWED_UPDATES,
+    });
   } catch (e) {
     // Roll back the partially-onboarded tenant — orphan record would otherwise occupy the botId slot.
     try {
@@ -260,7 +335,33 @@ async function handleTokenInput(
   await setState(env.nfd, senderId, { step: 'idle' });
   logEvent(host.debug, 'tenant_created', { botId, owner: senderId });
 
-  await reply(host, senderId, T.manager.onboardSuccess[locale](me.username, senderId));
+  // Bots cannot initiate chats: unless the owner has already opened the new bot and
+  // pressed Start, every guest forward would silently 403. Probe once so the success
+  // message can say exactly what to do.
+  const ownerReachable = await probeViaTenantBot(
+    token,
+    senderId,
+    T.manager.tenantProbeOwner[locale](),
+  );
+  await reply(
+    host,
+    senderId,
+    T.manager.onboardSuccess[locale](me.username, senderId, ownerReachable),
+  );
+}
+
+async function probeViaTenantBot(
+  token: string,
+  chatId: string,
+  text: string,
+): Promise<boolean> {
+  try {
+    await tg.sendMessage(token, { chat_id: chatId, text });
+    return true;
+  } catch (e) {
+    if (!(e instanceof TelegramError)) throw e;
+    return false;
+  }
 }
 
 async function handleList(
@@ -382,7 +483,11 @@ async function handlePauseResume(
 
   const target = `${baseUrl}/wh/${r.botId}`;
   try {
-    await tg.setWebhook(token, { url: target, secret_token: r.cfg.webhookSecret });
+    await tg.setWebhook(token, {
+      url: target,
+      secret_token: await storedWebhookSecret(r.cfg, encKey),
+      allowed_updates: ALLOWED_UPDATES,
+    });
   } catch (e) {
     await reply(
       host,
@@ -497,7 +602,20 @@ async function handleAdmins(
     }
     r.cfg.adminUids = [...r.cfg.adminUids, uid];
     await putStored(env.nfd, r.botId, r.cfg);
-    await reply(host, senderId, T.manager.adminAdded[locale](uid, r.cfg.adminUids.length));
+    // Same can't-initiate constraint as onboarding: the new admin receives nothing
+    // until they have started the tenant bot themselves.
+    const encKey = await getEncKey(host.masterEncKey);
+    const token = await decryptToken(r.cfg, encKey);
+    const reachable = await probeViaTenantBot(
+      token,
+      uid,
+      T.manager.tenantProbeAdmin[locale](r.cfg.botUsername),
+    );
+    await reply(
+      host,
+      senderId,
+      T.manager.adminAdded[locale](uid, r.cfg.adminUids.length, r.cfg.botUsername, reachable),
+    );
     return;
   }
 
@@ -558,6 +676,121 @@ async function handleStartMessage(
     senderId,
     T.manager.startMessageUpdated[locale](r.cfg.botUsername, content.length),
   );
+}
+
+async function handleInvite(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+  locale: Locale,
+): Promise<void> {
+  const uid = args.split(/\s+/).filter(Boolean)[0];
+  if (!uid) {
+    await reply(host, senderId, T.manager.inviteUsage[locale]());
+    return;
+  }
+  if (!/^\d+$/.test(uid)) {
+    await reply(host, senderId, T.manager.uidMustBeNumeric[locale]());
+    return;
+  }
+  if (await isInvited(env.nfd, uid)) {
+    await reply(host, senderId, T.manager.alreadyInvited[locale](uid));
+    return;
+  }
+  await env.nfd.put(INVITE_PREFIX + uid, '1');
+  await reply(host, senderId, T.manager.invited[locale](uid));
+  logEvent(host.debug, 'invited', { uid });
+}
+
+async function handleUninvite(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  args: string,
+  locale: Locale,
+): Promise<void> {
+  const uid = args.split(/\s+/).filter(Boolean)[0];
+  if (!uid) {
+    await reply(host, senderId, T.manager.uninviteUsage[locale]());
+    return;
+  }
+  if (!/^\d+$/.test(uid)) {
+    await reply(host, senderId, T.manager.uidMustBeNumeric[locale]());
+    return;
+  }
+  if (!(await isInvited(env.nfd, uid))) {
+    await reply(host, senderId, T.manager.notInInviteList[locale](uid));
+    return;
+  }
+  await env.nfd.delete(INVITE_PREFIX + uid);
+  await reply(host, senderId, T.manager.uninvited[locale](uid));
+  logEvent(host.debug, 'uninvited', { uid });
+}
+
+async function handleInvites(
+  env: Env,
+  host: HostConfig,
+  senderId: string,
+  locale: Locale,
+): Promise<void> {
+  const uids = await listInvited(env.nfd);
+  if (uids.length === 0) {
+    await reply(host, senderId, T.manager.invitesEmpty[locale]());
+    return;
+  }
+  await replyChunked(
+    host,
+    senderId,
+    T.manager.invitesHeader[locale](uids.length),
+    uids.map((u) => `· ${u}`),
+  );
+}
+
+// One-shot upgrade for tenants created by older versions: encrypts legacy plaintext
+// secrets and re-registers active webhooks so allowed_updates takes effect. Idempotent.
+async function handleHostMigrate(
+  env: Env,
+  host: HostConfig,
+  baseUrl: string,
+  senderId: string,
+  locale: Locale,
+): Promise<void> {
+  const all = await listStored(env.nfd);
+  const encKey = await getEncKey(host.masterEncKey);
+  let migrated = 0;
+  let webhooks = 0;
+  let failures = 0;
+  for (const { botId, cfg } of all) {
+    if (await encryptLegacySecrets(cfg, encKey)) {
+      await putStored(env.nfd, botId, cfg);
+      migrated++;
+    }
+    if (cfg.paused) continue;
+    try {
+      const token = await decryptToken(cfg, encKey);
+      await tg.setWebhook(token, {
+        url: `${baseUrl}/wh/${botId}`,
+        secret_token: await storedWebhookSecret(cfg, encKey),
+        allowed_updates: ALLOWED_UPDATES,
+      });
+      webhooks++;
+    } catch (e) {
+      if (!(e instanceof TelegramError)) throw e;
+      failures++;
+    }
+  }
+  await reply(
+    host,
+    senderId,
+    T.manager.hostMigrated[locale](all.length, migrated, webhooks, failures),
+  );
+  logEvent(host.debug, 'host_migrated', {
+    tenants: all.length,
+    migrated,
+    webhooks,
+    failures,
+  });
 }
 
 async function handleHostDisable(

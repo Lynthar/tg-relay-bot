@@ -42,6 +42,15 @@ export class ScopedKV {
   async list(subPrefix: string = ''): Promise<KvListResult> {
     return this.inner.list({ prefix: this.prefix + subPrefix });
   }
+
+  // Like list(), but returns key names relative to the scope prefix.
+  async listScoped(subPrefix: string = ''): Promise<{ names: string[]; complete: boolean }> {
+    const res = await this.inner.list({ prefix: this.prefix + subPrefix });
+    return {
+      names: res.keys.map((k) => k.name.slice(this.prefix.length)),
+      complete: res.list_complete,
+    };
+  }
 }
 
 export interface MsgMapEntry {
@@ -50,16 +59,31 @@ export interface MsgMapEntry {
   createdAt: number;
 }
 
+// Keyed by (adminId, adminMessageId): Telegram message_ids are unique only within a single
+// chat, so forwards delivered to different admins can carry the same message_id. Without the
+// admin dimension the entries collide and a reply can be routed to the wrong guest.
 export async function putMsgMap(
   skv: ScopedKV,
+  adminId: string,
   adminMessageId: number,
   entry: MsgMapEntry,
   ttlSec: number,
 ): Promise<void> {
-  await skv.put(`msg-map-${adminMessageId}`, JSON.stringify(entry), ttlSec);
+  await skv.put(`msg-map-${adminId}-${adminMessageId}`, JSON.stringify(entry), ttlSec);
 }
 
 export async function getMsgMap(
+  skv: ScopedKV,
+  adminId: string,
+  adminMessageId: number,
+): Promise<MsgMapEntry | null> {
+  return await skv.getJson<MsgMapEntry>(`msg-map-${adminId}-${adminMessageId}`);
+}
+
+// Pre-admin-scoped key format. Only safe to consult when the tenant has exactly one admin
+// (a single admin chat cannot collide with itself). Removable once entries written before
+// the key-format change have aged out (MSG_MAP_TTL_SEC).
+export async function getLegacyMsgMap(
   skv: ScopedKV,
   adminMessageId: number,
 ): Promise<MsgMapEntry | null> {

@@ -1,5 +1,5 @@
 import { env, SELF } from 'cloudflare:test';
-import { getEncKey } from '../src/crypto';
+import { encrypt, getEncKey } from '../src/crypto';
 import { createTenant, putStored, type StoredTenantCfg } from '../src/tenant';
 import type { DisplayMode, TgUpdate } from '../src/types';
 
@@ -26,6 +26,7 @@ export interface ProvisionedTenant {
   botId: string;
   token: string;
   webhookSecret: string;
+  hashSecret: string;
   cfg: StoredTenantCfg;
 }
 
@@ -37,7 +38,7 @@ export async function provisionTenant(args: {
 }): Promise<ProvisionedTenant> {
   const token = `${args.botId}:test-token-${args.botId}`;
   const encKey = await getEncKey(env.ENV_MASTER_ENC_KEY);
-  const cfg = await createTenant(env.nfd, encKey, {
+  const { cfg, webhookSecret, hashSecret } = await createTenant(env.nfd, encKey, {
     token,
     ownerUid: args.ownerUid,
     botUsername: args.botUsername ?? `test_bot_${args.botId}`,
@@ -47,7 +48,34 @@ export async function provisionTenant(args: {
     cfg.displayMode = args.displayMode;
     await putStored(env.nfd, args.botId, cfg);
   }
-  return { botId: args.botId, token, webhookSecret: cfg.webhookSecret, cfg };
+  return { botId: args.botId, token, webhookSecret, hashSecret, cfg };
+}
+
+// Writes a tenant cfg in the LEGACY pre-encryption format (plaintext secrets),
+// as records created by older versions look on disk.
+export async function provisionLegacyTenant(args: {
+  botId: string;
+  ownerUid: string;
+  botUsername?: string;
+}): Promise<ProvisionedTenant> {
+  const token = `${args.botId}:test-token-${args.botId}`;
+  const encKey = await getEncKey(env.ENV_MASTER_ENC_KEY);
+  const webhookSecret = `legacy-webhook-${args.botId}`;
+  const hashSecret = `legacy-hash-${args.botId}`;
+  const cfg: StoredTenantCfg = {
+    tokenEnc: await encrypt(token, encKey),
+    webhookSecret,
+    hashSecret,
+    adminUids: [args.ownerUid],
+    ownerUid: args.ownerUid,
+    botUsername: args.botUsername ?? `legacy_bot_${args.botId}`,
+    displayMode: 'native',
+    startMessage: 'hi',
+    createdAt: Date.now(),
+    paused: false,
+  };
+  await putStored(env.nfd, args.botId, cfg);
+  return { botId: args.botId, token, webhookSecret, hashSecret, cfg };
 }
 
 let nextId = 1_000_000;

@@ -4,12 +4,14 @@ import {
   checkRateLimit,
   clearBlocked,
   constantTimeEqual,
+  formatError,
   isBlocked,
   isDuplicateUpdate,
   setBlocked,
   userKey,
 } from '../../src/security';
 import { ScopedKV } from '../../src/storage';
+import { TelegramError } from '../../src/telegram';
 
 function freshSkv(): ScopedKV {
   return new ScopedKV(env.nfd, `test:sec:${crypto.randomUUID()}:`);
@@ -83,6 +85,38 @@ describe('blocklist', () => {
     expect(await isBlocked(skv, uk)).toBe(true);
     await clearBlocked(skv, uk);
     expect(await isBlocked(skv, uk)).toBe(false);
+  });
+});
+
+describe('formatError', () => {
+  it('TelegramError includes method and detail', () => {
+    const e = new TelegramError('forwardMessage', 'Forbidden: bot was blocked by the user');
+    expect(formatError('forward', e)).toBe(
+      'error event=forward name=TelegramError method=forwardMessage detail=Forbidden: bot was blocked by the user',
+    );
+  });
+
+  it('extra fields are emitted before error details', () => {
+    const e = new TelegramError('sendMessage', 'network');
+    expect(formatError('forward', e, { admin: '42' })).toContain('admin=42 name=TelegramError');
+  });
+
+  it('masks digit runs of 5+ so chatIds/UIDs cannot leak', () => {
+    const e = new Error('Unexpected token in {"chatId":1234567890,...');
+    const out = formatError('tenant_update', e);
+    expect(out).not.toContain('1234567890');
+    expect(out).toContain('<id>');
+  });
+
+  it('keeps short numbers and truncates very long messages', () => {
+    const e = new Error(`retry after 30 ${'x'.repeat(500)}`);
+    const out = formatError('t', e);
+    expect(out).toContain('retry after 30');
+    expect(out.length).toBeLessThan(300);
+  });
+
+  it('non-Error values fall back to name=Unknown', () => {
+    expect(formatError('t', 'boom')).toBe('error event=t name=Unknown');
   });
 });
 

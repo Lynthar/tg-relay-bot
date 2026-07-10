@@ -14,11 +14,9 @@ describe('tenant isolation', () => {
   it('same chatId hashes to different userKey across tenants (per-tenant hashSecret)', async () => {
     const a = await provisionTenant({ botId: '300001', ownerUid: '300001' });
     const b = await provisionTenant({ botId: '300002', ownerUid: '300002' });
-    expect(a.cfg.hashSecret).not.toBe(b.cfg.hashSecret);
+    expect(a.hashSecret).not.toBe(b.hashSecret);
     const guest = 12345;
-    expect(await userKey(guest, a.cfg.hashSecret)).not.toBe(
-      await userKey(guest, b.cfg.hashSecret),
-    );
+    expect(await userKey(guest, a.hashSecret)).not.toBe(await userKey(guest, b.hashSecret));
   });
 
   it('blocking a guest in tenant A does not block them in tenant B', async () => {
@@ -26,7 +24,7 @@ describe('tenant isolation', () => {
     const b = await provisionTenant({ botId: '300004', ownerUid: '300004' });
     const guest = 5555;
 
-    const ukA = await userKey(guest, a.cfg.hashSecret);
+    const ukA = await userKey(guest, a.hashSecret);
     const skvA = new ScopedKV(env.nfd, `tenant:${a.botId}:`);
     await skvA.put(`block-${ukA}`, '1');
 
@@ -49,10 +47,10 @@ describe('tenant isolation', () => {
     const skvA = new ScopedKV(env.nfd, `tenant:${a.botId}:`);
     const skvB = new ScopedKV(env.nfd, `tenant:${b.botId}:`);
 
-    await putMsgMap(skvA, 4242, { chatId: 999, userKey: 'uk-a', createdAt: Date.now() }, 60);
+    await putMsgMap(skvA, '900', 4242, { chatId: 999, userKey: 'uk-a', createdAt: Date.now() }, 60);
 
-    expect(await getMsgMap(skvA, 4242)).not.toBeNull();
-    expect(await getMsgMap(skvB, 4242)).toBeNull();
+    expect(await getMsgMap(skvA, '900', 4242)).not.toBeNull();
+    expect(await getMsgMap(skvB, '900', 4242)).toBeNull();
   });
 
   it('deleting tenant A purges only A and leaves tenant B intact', async () => {

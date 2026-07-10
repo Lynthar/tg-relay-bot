@@ -22,6 +22,12 @@ export const RATE_LIMIT_MAX = 5;
 export const MSG_MAP_TTL_SEC = 30 * 24 * 3600;
 export const DEDUP_TTL_SEC = 5 * 60;
 export const MEDIA_GROUP_TAG_TTL_SEC = 60;
+// Per-owner tenant cap (host exempt). KV write quota is platform-wide, so one
+// over-enthusiastic friend must not be able to crowd out everyone else.
+export const MAX_TENANTS_PER_UID = 3;
+// Only `message` is ever processed; restricting the webhook saves Worker
+// invocations (edited_message, callback_query, ... are never delivered).
+export const ALLOWED_UPDATES = ['message'];
 
 export async function parseHostConfig(env: Env): Promise<HostConfig> {
   const required = (n: string, v: string | undefined): string => {

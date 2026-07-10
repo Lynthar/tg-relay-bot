@@ -45,10 +45,10 @@
 ## 核心特性
 
 - **轻量** — 单 Cloudflare Worker + 单 KV namespace，零运行时外部依赖
-- **多租户** — 一次部署托管所有 bot；朋友在 Telegram 内自助 onboard
-- **token 加密** — 所有 tenant 的 bot token 在 KV 中以 AES-GCM 加密存储
+- **多租户** — 一次部署托管所有 bot；朋友在 Telegram 内自助 onboard（需 host 先 `/invite` 邀请）
+- **静态加密** — 所有 tenant 的 bot token、webhook secret、hashSecret 在 KV 中一律 AES-GCM 加密存储
 - **访客匿名化** — 访客 chatId 在 KV 中以 HMAC-SHA256 哈希形式存储；dump KV 也无法还原"是谁联系过谁"
-- **安全收紧** — webhook 路径不可猜、强制 secret_token 校验、constant-time 比较、`update_id` 去重、限速、admin 命令必须 reply 转发消息
+- **安全收紧** — 每个 webhook 请求强制校验每租户随机的 secret_token（constant-time 比较）、`update_id` 去重、限速、admin 命令必须 reply 转发消息
 - **零成本** — Cloudflare 免费档对个人/小团队完全够用
 
 ## 适用与不适用场景
@@ -93,11 +93,13 @@
 
 ### 第一次接入
 
-1. 去 [@BotFather](https://t.me/BotFather) 发 `/newbot`，按指引取一个名字和用户名，复制返回的 token（形如 `12345:ABC...`）
-2. 在 Telegram 找 host 给你的管家 bot
-3. 发 `/setup`，再粘贴上一步的 token
+1. 在 Telegram 找 host 给你的管家 bot，发 `/whoami` 拿到你的 UID，把它告诉 host；host 执行 `/invite <你的UID>` 后你才能进行下一步
+2. 去 [@BotFather](https://t.me/BotFather) 发 `/newbot`，按指引取一个名字和用户名，复制返回的 token（形如 `12345:ABC...`）
+3. 回到管家 bot 发 `/setup`，再粘贴上一步的 token
 4. 看到 `✅ @你的bot 已上线` 就完事
 5. **重要**：长按你刚才发 token 的消息 → 选 "Delete for me and bot"，把 token 从聊天历史里清掉
+
+每个用户最多可 onboard 3 个 bot（host 自己不限）。
 
 ### 日常使用
 
@@ -115,9 +117,11 @@
 | reply 一条转发消息发 `/block` | 屏蔽该访客 |
 | reply 一条转发消息发 `/unblock` | 解除屏蔽 |
 | reply 一条转发消息发 `/checkblock` | 查询是否屏蔽 |
+| 发 `/blocklist` | 列出所有被屏蔽访客的 userKey |
+| 发 `/unblock <userKey>` | 按 userKey 解除屏蔽（无需 reply） |
 | 发 `/status` | 看该 bot 的运行状态（msg-map 数 / 黑名单数等） |
 
-⚠️ `/block` 等**必须是回复一条转发消息**才生效——禁止裸输入 UID，避免误伤。
+⚠️ `/block` **必须是回复一条转发消息**才生效——禁止裸输入 UID，避免误伤。解除屏蔽有一个例外：被屏蔽的访客不再产生新转发，老转发 30 天后过期，届时用 `/unblock <userKey>`（参数是匿名哈希，见 `/blocklist`），而不是 UID。
 
 ### 管理你拥有的 bot
 
@@ -211,7 +215,7 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 部署完后，host 也要走一遍 friend 流程才能拥有第一个对外 bot：
 
 1. 去 BotFather 单独建一个对外的 relay bot（**不是管家 bot**）
-2. 在管家 bot 里 `/setup`，粘贴新 bot 的 token
+2. 在管家 bot 里 `/setup`，粘贴新 bot 的 token（host 无需邀请自己，也不受数量上限约束）
 3. 完事
 
 ---
@@ -226,7 +230,7 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 | `/help` | 命令清单（host 会多看到 host-only 命令） |
 | `/whoami` | 显示你的 Telegram UID |
 | `/cancel` | 重置当前会话状态（中止 /setup） |
-| `/setup` | 多轮对话：粘 token → 自动验证 → 自动注册 webhook |
+| `/setup` | 多轮对话：粘 token → 自动验证 → 自动注册 webhook（需 host 先 `/invite`；每人上限 3 个 bot） |
 | `/list` | 列出你拥有的所有 bot |
 | `/info <bot_username>` | 查看某个 bot 的详情 |
 | `/displaymode <bot_username> <native\|tag\|hex>` | 切换显示模式 |
@@ -240,6 +244,10 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 
 | 命令 | 说明 |
 |---|---|
+| `/host_migrate` | 从旧版本升级后运行一次：加密存量租户的明文 secrets 并刷新 webhook；可重复运行 |
+| `/invite <uid>` | 邀请某用户使用 `/setup`（对方可发 `/whoami` 查 UID） |
+| `/uninvite <uid>` | 取消邀请（不影响其已 onboard 的 bot，需要时用 `/host_purge`） |
+| `/invites` | 查看邀请列表 |
 | `/host_list` | 列出**所有**租户（含其他朋友的） |
 | `/host_disable <bot_username>` | 强制暂停任意 tenant（不需要是 owner） |
 | `/host_purge <bot_username> --yes` | 强制删除任意 tenant；不带 `--yes` 仅提示 |
@@ -266,6 +274,8 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 | reply 一条转发消息发 `/block` | 拉黑该访客 |
 | reply 一条转发消息发 `/unblock` | 解黑 |
 | reply 一条转发消息发 `/checkblock` | 查询是否被屏蔽 |
+| 发 `/blocklist` | 列出被屏蔽访客的 userKey |
+| 发 `/unblock <userKey>` | 按 userKey 解除屏蔽（应对原转发消息已过期的情况） |
 | 发 `/status` | 显示运行状态（msg-map / block / rate-limit windows 计数） |
 
 非 admin 用户发 `/block` 等命令 → 命令不生效（被当作普通消息转发给 admin）。
@@ -324,6 +334,11 @@ npx wrangler deploy
 
 不需要重新注册 webhook、不需要重新 put secret、不会丢 KV 数据。
 
+从引入 `/host_migrate` 之前的旧版本升级上来时，部署后做两件事（都幂等，可重跑）：
+
+1. 重跑一次 `curl 'https://.../admin/registerWebhook?s=<ENV_ADMIN_SECRET>'`——让管家 bot 的 webhook 应用 `allowed_updates`
+2. 在管家 bot 里运行 `/host_migrate`——加密存量租户的明文 secrets，并刷新各租户 webhook
+
 ### 完全卸载
 
 ```bash
@@ -368,14 +383,14 @@ npx wrangler kv namespace delete --binding=nfd
 ### 我们能做到的
 
 - 访客 chatId 在 KV 中以 HMAC-SHA256 哈希存储（`userKey`），dump KV 看不到 chatId 明文（除短期 msg-map 之外）
-- 所有 tenant token 用 AES-GCM 加密存储于 KV
-- webhook URL 路径派生自 SHA-256，不可猜
-- webhook secret 校验用 constant-time 比较，防侧信道
+- 所有 tenant 的 token、webhook secret、hashSecret 都以 AES-GCM 加密存储于 KV——单独拿到 KV dump（没有 `ENV_MASTER_ENC_KEY`）无法对 userKey 做离线暴力反推（从旧版本升级的部署需先运行一次 `/host_migrate`）
+- webhook 鉴权依赖每租户随机的 `secret_token` header（constant-time 比较，防侧信道），而非路径保密——路径中的 botId 本身是公开信息；secret 缺失或错误一律返回统一的 404，无法用于探测某个 bot 是否托管在此
 - Telegram 重发的 webhook 自动去重（`update_id`）
 - 每访客 60s 内最多 5 条；超出静默丢弃
 - 所有 admin 端点强制 `ENV_ADMIN_SECRET`，无效一律 404
 - bot 默认忽略群聊与 `message` 之外的所有更新类型
 - 管理命令必须 reply 一条转发消息才生效，禁止裸 UID 操作
+- onboard 需要 host 显式 `/invite` 邀请，且每人有 bot 数量上限——陌生人即使找到管家 bot 也无法把 bot 挂到你的部署上
 
 ### 我们做不到的
 
@@ -400,13 +415,14 @@ npx wrangler kv namespace delete --binding=nfd
 
 | 数据 | 保留时长 |
 |---|---|
-| `tenant:{botId}:cfg`（含加密 token） | 直到 `/delete --yes` |
-| `tenant:{botId}:msg-map-{id}` | 30 天后 TTL 过期 |
+| `tenant:{botId}:cfg`（含加密 token 与 secrets） | 直到 `/delete --yes` |
+| `tenant:{botId}:msg-map-{adminUid}-{id}` | 30 天后 TTL 过期 |
 | `tenant:{botId}:block-{userKey}` | 直到 `/unblock` |
 | `tenant:{botId}:rate-{userKey}` | 60 秒后 TTL 过期 |
 | `tenant:{botId}:update-{id}` | 5 分钟后 TTL 过期 |
 | `manager:user-state-{uid}` | 1 小时无活动后 TTL 过期 |
 | `manager:dedup-update-{id}` | 5 分钟后 TTL 过期 |
+| `manager:allow-{uid}`（邀请列表） | 直到 `/uninvite` |
 
 ---
 

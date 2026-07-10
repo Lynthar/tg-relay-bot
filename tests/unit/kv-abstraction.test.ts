@@ -122,11 +122,12 @@ describe('KvStore abstraction (no Cloudflare deps)', () => {
     const s = new ScopedKV(new InMemoryKvStore(), 'tenant:7:');
     await putMsgMap(
       s,
+      '42',
       9999,
       { chatId: 100, userKey: 'uk-test', createdAt: 1234 },
       60,
     );
-    expect(await getMsgMap(s, 9999)).toEqual({
+    expect(await getMsgMap(s, '42', 9999)).toEqual({
       chatId: 100,
       userKey: 'uk-test',
       createdAt: 1234,
