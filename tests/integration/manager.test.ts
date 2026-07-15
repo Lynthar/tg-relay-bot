@@ -11,7 +11,7 @@ import {
   provisionTenant,
   tgMock,
 } from '../helpers';
-import { getStored } from '../../src/tenant';
+import { getStored, putStored, deleteStored } from '../../src/tenant';
 import { ScopedKV } from '../../src/storage';
 
 beforeAll(() => tgMock.install());
@@ -549,6 +549,35 @@ describe('/host_migrate', () => {
     await flush();
     const m = lastReplyText().match(/：(\d+) 个完成 secrets 加密迁移/);
     expect(m?.[1]).toBe('0');
+  });
+
+  it('a tenant with an undecryptable token does not abort the batch', async () => {
+    // The corrupt tenant sorts lexicographically BEFORE the good one, so a loop that
+    // re-throws on the first non-TelegramError would abort here and never reach the good
+    // tenant — this asserts the good tenant is still migrated regardless.
+    const bad = await provisionTenant({ botId: '620610', ownerUid: '620610' });
+    const badCfg = (await getStored(env.nfd, bad.botId))!;
+    badCfg.tokenEnc = 'AAAAAAAAAAAAAAAAAAAA'; // valid base64, too short to decrypt → OperationError
+    await putStored(env.nfd, bad.botId, badCfg);
+
+    const good = await provisionLegacyTenant({ botId: '620611', ownerUid: '620611' });
+
+    await sendManagerCmd(Number(HOST_UID), '/host_migrate');
+    await flush();
+
+    // Remove the corrupt tenant now — before the assertions — so a failing expect can never
+    // leak it into a later test.
+    await deleteStored(env.nfd, bad.botId);
+
+    // The good tenant, iterated after the corrupt one, still had its webhook refreshed and its
+    // legacy secrets encrypted; the run reported at least one failure.
+    const goodHooks = tgMock
+      .getCallsByMethod('setWebhook')
+      .filter((c) => c.url.includes(good.token));
+    expect(goodHooks.length).toBe(1);
+    const goodStored = await getStored(env.nfd, good.botId);
+    expect(goodStored?.hashSecretEnc).toBeDefined();
+    expect(lastReplyText()).toMatch(/1 个刷新失败/);
   });
 });
 

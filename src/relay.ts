@@ -124,7 +124,10 @@ async function relayToAdmins(
       logEvent(debug, 'forwarded', { uk, admin: adminId });
     } catch (e) {
       if (e instanceof TelegramError) {
-        logError('forward', e, { admin: adminId });
+        // botId, not adminId: an admin's UID is a chatId, which must never reach an
+        // always-on log (privacy invariant). Per-admin detail stays in the debug-gated
+        // 'forwarded' event above.
+        logError('forward', e, { botId: cfg.botId });
         continue;
       }
       throw e;

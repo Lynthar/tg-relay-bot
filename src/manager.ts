@@ -281,6 +281,12 @@ async function handleTokenInput(
   }
 
   if (senderId !== host.hostUid) {
+    // Best-effort soft cap. Workers KV has no atomic ops and list is eventually consistent
+    // (up to ~60s lag), so rapid or concurrent /setup can overshoot this by one or two before
+    // the count converges. That is acceptable for the cap's purpose — keeping one owner from
+    // monopolising the shared KV write quota — and the host can always /uninvite an abuser. A
+    // hard, race-free guarantee would require a Durable Object counter, out of scope for this
+    // KV-only Worker.
     const owned = await listStoredByOwner(env.nfd, senderId);
     if (owned.length >= MAX_TENANTS_PER_UID) {
       await setState(env.nfd, senderId, { step: 'idle' });
@@ -762,12 +768,17 @@ async function handleHostMigrate(
   let webhooks = 0;
   let failures = 0;
   for (const { botId, cfg } of all) {
-    if (await encryptLegacySecrets(cfg, encKey)) {
-      await putStored(env.nfd, botId, cfg);
-      migrated++;
-    }
-    if (cfg.paused) continue;
+    // Per-tenant isolation: unlike the per-update convention (non-TelegramError bubbles to
+    // the top-level handler), a host-triggered bulk migrate must not let one corrupt or
+    // unreachable tenant abort the whole batch. Any failure — encrypt, KV write, decrypt, or
+    // webhook — is logged (botId only) and counted, then the loop moves on. Idempotent, so a
+    // re-run retries the failures.
     try {
+      if (await encryptLegacySecrets(cfg, encKey)) {
+        await putStored(env.nfd, botId, cfg);
+        migrated++;
+      }
+      if (cfg.paused) continue;
       const token = await decryptToken(cfg, encKey);
       await tg.setWebhook(token, {
         url: `${baseUrl}/wh/${botId}`,
@@ -776,7 +787,7 @@ async function handleHostMigrate(
       });
       webhooks++;
     } catch (e) {
-      if (!(e instanceof TelegramError)) throw e;
+      logError('host_migrate', e, { botId });
       failures++;
     }
   }
