@@ -134,8 +134,8 @@ In the manager bot:
 | `/displaymode <bot_username> <native\|tag\|hex>` | Change display mode (see below) |
 | `/admins <bot_username> [add\|remove <uid> \| list]` | Manage admin UIDs (owner cannot be removed) |
 | `/start_message <bot_username> <text>` | Customize the /start message (multi-line; up to 1000 chars) |
-| `/pause <bot_username>` | Pause (unregister webhook; bot stops receiving) |
-| `/resume <bot_username>` | Resume (re-register webhook) |
+| `/pause <bot_username>` | Pause (unregister webhook; messages sent meanwhile queue on Telegram's side, kept up to 24h) |
+| `/resume <bot_username>` | Resume (re-register webhook; queued messages from the pause are delivered) |
 | `/delete <bot_username> --yes` | Delete (unregister webhook + purge all KV) |
 
 Without `--yes`, `/delete` only prints a confirmation prompt.
@@ -166,7 +166,8 @@ npx wrangler login
 npx wrangler kv namespace create nfd
 # Paste the returned id into wrangler.toml at id = "..."
 # ⚠️ The id currently in the file belongs to a previous host; if you don't replace it,
-# you'll be writing into someone else's KV namespace.
+# deploy fails with "KV namespace not found" (or, within the same Cloudflare
+# account, silently binds to the old data).
 
 # 4. Set the four required secrets
 npx wrangler secret put ENV_MANAGER_BOT_TOKEN   # the manager bot token from above
@@ -235,10 +236,10 @@ Available to both friends and host:
 | `/list` | List bots you own |
 | `/info <bot_username>` | Show details for a bot |
 | `/displaymode <bot_username> <native\|tag\|hex>` | Change display mode |
-| `/admins <bot_username> [add\|remove <uid> \| list]` | Manage admin UIDs; defaults to `list`; the owner cannot be removed |
+| `/admins <bot_username> [add\|remove <uid> \| list]` | Manage admin UIDs; defaults to `list`; the owner cannot be removed; max 10 admins per bot |
 | `/start_message <bot_username> <text>` | Customize the /start message (multi-line allowed, up to 1000 chars) |
-| `/pause <bot_username>` | Pause a bot |
-| `/resume <bot_username>` | Resume a bot |
+| `/pause <bot_username>` | Pause a bot (guest messages sent while paused queue on Telegram's side for up to 24h) |
+| `/resume <bot_username>` | Resume a bot (queued messages from the pause are then delivered) |
 | `/delete <bot_username> [--yes]` | Delete bot; bare form prints a confirmation, with `--yes` actually deletes |
 
 Host only:
@@ -263,11 +264,11 @@ For everyone:
 
 | Command | Purpose |
 |---|---|
-| `/start` | Show welcome message (default is bilingual) |
+| `/start` | Show welcome message (default is bilingual; the owner can customize it via `/start_message` in the manager bot) |
 | `/help` | Show usage |
 | `/whoami` | Show the sender's UID |
 
-For the owner only (i.e. the friend who onboarded this bot):
+For admins only (the owner plus anyone they added via `/admins`):
 
 | Action | Effect |
 |---|---|
@@ -279,7 +280,9 @@ For the owner only (i.e. the friend who onboarded this bot):
 | Send `/unblock <userKey>` | Unblock by userKey (for when the original forward has expired) |
 | Send `/status` | Show stats (msg-map / blocked / rate-limit windows counts) |
 
-Non-admin users sending `/block` etc. → not effective; the message is treated as a normal forward to admin.
+Non-admin users sending `/block` etc. → not effective; the message is treated as a normal forward to admin. Admin-sent text starting with `/` that is not one of the commands above (e.g. a typo like `/blck`) is intercepted with a notice and never sent to the guest.
+
+Note: the webhook only subscribes to new messages (`message`); a guest's **edits to already-sent messages are not synced** to admins.
 
 ---
 
@@ -308,20 +311,20 @@ Default: only error output. Set `ENV_DEBUG=1` to see structured event flow (stil
 ### Inspect KV
 
 ```bash
-# Top-level overview
-npx wrangler kv key list --binding=nfd
+# Top-level overview. Note --remote: Wrangler v4 targets local simulated data by default
+npx wrangler kv key list --binding=nfd --remote
 
 # All keys for one tenant
-npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:"
+npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote
 ```
 
 ### Force-purge a tenant (bypass manager bot)
 
-Normally use `/delete <bot_username> --yes`. If the manager bot is down:
+Normally use `/delete <bot_username> --yes`. If the manager bot is down (requires `jq`; both commands need `--remote`, or you'd be deleting local simulated data):
 
 ```bash
 for key in $(npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote | jq -r '.[].name'); do
-  npx wrangler kv key delete --binding=nfd "$key"
+  npx wrangler kv key delete --binding=nfd "$key" --remote
 done
 ```
 
@@ -375,7 +378,7 @@ Caveats:
 
 Just want to rotate one secret without touching Worker / KV? Run `npx wrangler secret put <NAME>` to overwrite. Note: rotating `ENV_MASTER_ENC_KEY` makes **all existing tenant tokens undecryptable**.
 
-Just want to take everything offline temporarily (no data loss)? `/pause` each tenant from the manager bot; `/resume` brings it back.
+Just want to take everything offline temporarily (no data loss)? `/pause` each tenant from the manager bot; `/resume` brings it back. Note that guest messages sent while paused queue on Telegram's side (up to 24 hours) and are delivered to admins after `/resume`; anything older is dropped by Telegram.
 
 ---
 
@@ -383,7 +386,7 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 
 ### What we guarantee
 
-- Guest chatIds are stored in KV as HMAC-SHA256 hashes (`userKey`); a KV dump reveals no chatId plaintext (except short-lived msg-map records)
+- Guest chatIds are stored in KV as HMAC-SHA256 hashes (`userKey`); a KV dump reveals no chatId plaintext (the one exception is the reply-routing msg-map, which expires after 30 days)
 - Every tenant's token, webhook secret, and hashSecret are AES-GCM encrypted at rest in KV — a KV dump alone (without `ENV_MASTER_ENC_KEY`) cannot brute-force userKeys offline (deployments upgraded from older versions must run `/host_migrate` once)
 - Webhook auth relies on a per-tenant random `secret_token` header (constant-time compared, thwarting side channels), not path secrecy — the botId in the path is public information; a missing or wrong secret gets a uniform 404, unusable for probing whether a bot is hosted here
 - Telegram's webhook retries are deduplicated by `update_id`
@@ -421,6 +424,7 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 | `tenant:{botId}:block-{userKey}` | Until `/unblock` |
 | `tenant:{botId}:rate-{userKey}` | TTL 60 seconds |
 | `tenant:{botId}:update-{id}` | TTL 5 minutes |
+| `tenant:{botId}:mg-*` / `album-*` (album tag & rate-unit dedup markers) | TTL 60 seconds |
 | `manager:user-state-{uid}` | TTL 1 hour after inactivity |
 | `manager:dedup-update-{id}` | TTL 5 minutes |
 | `manager:allow-{uid}` (invite list) | Until `/uninvite` |
@@ -430,10 +434,10 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 ## FAQ
 
 **Q: What if I change `ENV_MASTER_ENC_KEY`?**
-A: All tenants become irrecoverable — this key encrypts every token. Each must re-`/setup`. **Never rotate it.**
+A: All tenants become irrecoverable — this key encrypts every token. **Never rotate it.** If it does happen (key lost or mistakenly replaced), the recovery path: `/delete <bot> --yes` (or host `/host_purge`) each tenant — the local purge still runs even when the token can no longer be decrypted; only the old webhook can't be deregistered on the tenant's behalf — then re-`/setup`; the new setWebhook simply overwrites the old webhook.
 
 **Q: Why does the webhook URL sometimes return 404?**
-A: Four possibilities: (a) wrong path; (b) missing/wrong `X-Telegram-Bot-Api-Secret-Token` header; (c) tenant `/pause`d; (d) tenant deleted.
+A: Three possibilities: (a) wrong path; (b) missing/wrong `X-Telegram-Bot-Api-Secret-Token` header; (c) tenant deleted. A `/pause`d tenant does NOT 404 — it returns 200 and drops the update (normally pause has unregistered the webhook, so Telegram stops delivering at all).
 
 **Q: Manager bot doesn't respond.**
 A: Check `npx wrangler tail`; re-register via `/admin/registerWebhook?s=...`; verify `ENV_MANAGER_BOT_TOKEN` is correct.
@@ -442,16 +446,16 @@ A: Check `npx wrangler tail`; re-register via `/admin/registerWebhook?s=...`; ve
 A: In the manager bot, `/info <their_bot>` → check `status`; if paused, `/resume`; or have the friend re-`/setup`.
 
 **Q: Can friends see each other's bot data?**
-A: No. Tenants are isolated by KV prefix (`tenant:{botId}:`), and only owners can use `/info /pause /...` on their own. Host can `/host_list` to see tenants exist, but message contents are not persisted.
+A: Other friends cannot — tenants are isolated by KV prefix (`tenant:{botId}:`), and a regular user's `/info /pause /...` only reach bots they own. The **host, however, is the super-admin**: besides the `/host_*` commands, the host's regular management commands also work on any tenant (the host already holds the master key and the Cloudflare account, so this concedes no extra trust). Message contents are visible to no one — they are not persisted.
 
 **Q: Is Cloudflare's free tier enough?**
-A: Usually yes. Workers free: 100k requests/day; KV free: 1k writes/day. Each guest message is ~3-4 KV writes. 10 friends × 50 messages/day ≈ 1500-2000 writes — may slightly exceed; if so, Workers Paid ($5/month) gives 1M writes/month.
+A: For small scale, yes. Workers free: 100k requests/day; KV free: **1k writes/day (shared platform-wide, resets 00:00 UTC)**. Each delivered guest message costs ~3 KV writes (blocked / rate-limited / junk messages cost none). Beware: **once the daily free quota is exhausted, further KV writes fail outright** — messages are silently lost, not "slightly over budget". 10 friends × 50 messages/day ≈ 1500 writes clearly exceeds it — at that scale use Workers Paid ($5/month, 1M writes/month).
 
 **Q: How do I run it locally?**
 A: Create `.dev.vars` (gitignored) mirroring all four required secrets, then `npx wrangler dev`.
 
 **Q: Why does a guest who sends 6+ messages within 60 seconds only see the first 5 reach the admin?**
-A: Rate limiting. Per-guest cap is 5 per 60s; excess is silently dropped (no feedback to attackers).
+A: Rate limiting. Per-guest cap is 5 per 60s; excess is silently dropped (no feedback to attackers). A media group (album) counts as a single unit, so a 2–10 item album arrives whole.
 
 ---
 

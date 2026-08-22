@@ -134,8 +134,8 @@
 | `/displaymode <bot_username> <native\|tag\|hex>` | 切换显示模式（[见下](#显示模式)） |
 | `/admins <bot_username> [add\|remove <uid> \| list]` | 管理管理员（owner 不能被移除） |
 | `/start_message <bot_username> <文案>` | 改 /start 文案（支持多行；最长 1000 字符） |
-| `/pause <bot_username>` | 暂停（注销 webhook，bot 不再接收消息） |
-| `/resume <bot_username>` | 恢复（重新注册 webhook） |
+| `/pause <bot_username>` | 暂停（注销 webhook；暂停期间的访客消息在 Telegram 侧排队，最多保留 24 小时） |
+| `/resume <bot_username>` | 恢复（重新注册 webhook；暂停期间排队的消息会被补发） |
 | `/delete <bot_username> --yes` | 删除（注销 webhook + 清所有 KV） |
 
 `/delete` 不带 `--yes` 只会提示确认，加上才真删。
@@ -165,7 +165,8 @@ npx wrangler login
 # 3. 创建 KV namespace
 npx wrangler kv namespace create nfd
 # 把返回的 id 填进 wrangler.toml 里的 id = "..."
-# ⚠️ 仓库里现有的 id 是上一任 host 的；不替换会写入别人的 KV namespace
+# ⚠️ 仓库里现有的 id 是上一任 host 的；不替换的话部署会报
+#    "KV namespace not found"（若恰好在同一 Cloudflare 账号下则会误绑旧数据）
 
 # 4. 设置 4 个必填 secret
 npx wrangler secret put ENV_MANAGER_BOT_TOKEN   # 上面建的管家 bot token
@@ -234,10 +235,10 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 | `/list` | 列出你拥有的所有 bot |
 | `/info <bot_username>` | 查看某个 bot 的详情 |
 | `/displaymode <bot_username> <native\|tag\|hex>` | 切换显示模式 |
-| `/admins <bot_username> [add\|remove <uid> \| list]` | 管理管理员列表；不带动作默认 `list`；不能移除 owner |
+| `/admins <bot_username> [add\|remove <uid> \| list]` | 管理管理员列表；不带动作默认 `list`；不能移除 owner；每 bot 最多 10 名管理员 |
 | `/start_message <bot_username> <文案>` | 自定义 /start 文案（支持多行，最长 1000 字符） |
-| `/pause <bot_username>` | 暂停 bot |
-| `/resume <bot_username>` | 恢复 bot |
+| `/pause <bot_username>` | 暂停 bot（暂停期间的访客消息在 Telegram 侧最多排队 24 小时） |
+| `/resume <bot_username>` | 恢复 bot（补发暂停期间排队的消息） |
 | `/delete <bot_username> [--yes]` | 删除 bot；不带 `--yes` 仅提示，加上才真删 |
 
 仅 host 可用：
@@ -262,11 +263,11 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 
 | 命令 | 说明 |
 |---|---|
-| `/start` | 显示欢迎语（默认中英双语；当前不可通过命令自定义） |
+| `/start` | 显示欢迎语（默认中英双语；owner 可在管家 bot 里用 `/start_message` 自定义） |
 | `/help` | 显示用法 |
 | `/whoami` | 显示当前发送者的 UID |
 
-仅所有者可用（即 onboard 这个 bot 的 friend）：
+仅管理员可用（owner 以及其通过 `/admins` 添加的人）：
 
 | 操作 | 效果 |
 |---|---|
@@ -278,7 +279,9 @@ curl 'https://tg-relay-bot.<你的子域>.workers.dev/admin/registerWebhook?s=<E
 | 发 `/unblock <userKey>` | 按 userKey 解除屏蔽（应对原转发消息已过期的情况） |
 | 发 `/status` | 显示运行状态（msg-map / block / rate-limit windows 计数） |
 
-非 admin 用户发 `/block` 等命令 → 命令不生效（被当作普通消息转发给 admin）。
+非 admin 用户发 `/block` 等命令 → 命令不生效（被当作普通消息转发给 admin）。管理员发送的以 `/` 开头但不是上述命令的文本（如拼错的 `/blck`）会被拦截并提示，不会发送给访客。
+
+注意：webhook 只订阅新消息（`message`），访客对已发送消息的**编辑不会同步**给管理员。
 
 ---
 
@@ -307,20 +310,20 @@ npx wrangler tail
 ### 查看 KV 数据
 
 ```bash
-# 列所有 key（看大致状态）
-npx wrangler kv key list --binding=nfd
+# 列所有 key（看大致状态）。注意 --remote：Wrangler v4 默认操作本地模拟数据
+npx wrangler kv key list --binding=nfd --remote
 
 # 看某个 tenant 的全部 key
-npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:"
+npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote
 ```
 
 ### 强制清除某个 tenant（绕过管家 bot）
 
-正常请走 `/delete <bot_username> --yes`。如果管家 bot 不可用：
+正常请走 `/delete <bot_username> --yes`。如果管家 bot 不可用（需要 `jq`；两条命令都必须带 `--remote`，否则删的是本地模拟数据）：
 
 ```bash
 for key in $(npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote | jq -r '.[].name'); do
-  npx wrangler kv key delete --binding=nfd "$key"
+  npx wrangler kv key delete --binding=nfd "$key" --remote
 done
 ```
 
@@ -374,7 +377,7 @@ npx wrangler kv namespace delete --binding=nfd
 
 只想换某个 secret 不动 Worker / KV：直接 `npx wrangler secret put <NAME>` 覆盖即可。注意 `ENV_MASTER_ENC_KEY` 换了**所有现有 tenant token 不可解**。
 
-只想暂时下线（不删数据）：在管家 bot 里给每个 tenant `/pause` 即可，`/resume` 恢复。
+只想暂时下线（不删数据）：在管家 bot 里给每个 tenant `/pause` 即可，`/resume` 恢复。注意暂停期间访客发来的消息会在 Telegram 侧排队（最长 24 小时），`/resume` 后会补发给管理员；超过 24 小时的部分由 Telegram 丢弃。
 
 ---
 
@@ -382,7 +385,7 @@ npx wrangler kv namespace delete --binding=nfd
 
 ### 我们能做到的
 
-- 访客 chatId 在 KV 中以 HMAC-SHA256 哈希存储（`userKey`），dump KV 看不到 chatId 明文（除短期 msg-map 之外）
+- 访客 chatId 在 KV 中以 HMAC-SHA256 哈希存储（`userKey`），dump KV 看不到 chatId 明文（唯一例外是回复路由用的 msg-map，保留 30 天后自动过期）
 - 所有 tenant 的 token、webhook secret、hashSecret 都以 AES-GCM 加密存储于 KV——单独拿到 KV dump（没有 `ENV_MASTER_ENC_KEY`）无法对 userKey 做离线暴力反推（从旧版本升级的部署需先运行一次 `/host_migrate`）
 - webhook 鉴权依赖每租户随机的 `secret_token` header（constant-time 比较，防侧信道），而非路径保密——路径中的 botId 本身是公开信息；secret 缺失或错误一律返回统一的 404，无法用于探测某个 bot 是否托管在此
 - Telegram 重发的 webhook 自动去重（`update_id`）
@@ -420,6 +423,7 @@ npx wrangler kv namespace delete --binding=nfd
 | `tenant:{botId}:block-{userKey}` | 直到 `/unblock` |
 | `tenant:{botId}:rate-{userKey}` | 60 秒后 TTL 过期 |
 | `tenant:{botId}:update-{id}` | 5 分钟后 TTL 过期 |
+| `tenant:{botId}:mg-*` / `album-*`（相册标签与限速去重标记） | 60 秒后 TTL 过期 |
 | `manager:user-state-{uid}` | 1 小时无活动后 TTL 过期 |
 | `manager:dedup-update-{id}` | 5 分钟后 TTL 过期 |
 | `manager:allow-{uid}`（邀请列表） | 直到 `/uninvite` |
@@ -429,10 +433,10 @@ npx wrangler kv namespace delete --binding=nfd
 ## 常见问题
 
 **Q: 如果换了 `ENV_MASTER_ENC_KEY` 会怎样？**
-全部 tenant 不可恢复——这个 key 用于加密所有 token，换了等于丢失全部 token。每个租户必须重新 `/setup`。**永远不要换**这个 key。
+全部 tenant 不可恢复——这个 key 用于加密所有 token，换了等于丢失全部 token。**永远不要换**这个 key。真的发生了（key 丢失/误换）的恢复路径：每个租户先 `/delete <bot> --yes`（或 host `/host_purge`）清掉本地数据——即使 token 已解不开，本地清理仍会执行，只是无法替租户注销旧 webhook——然后重新 `/setup`，新的 setWebhook 会直接覆盖旧 webhook。
 
 **Q: 为什么 webhook 路径有时候返回 404？**
-可能 4 种：(a) URL 不对；(b) `X-Telegram-Bot-Api-Secret-Token` header 缺失或不对；(c) tenant 已 `/pause`；(d) tenant 已删除。
+可能 3 种：(a) URL 不对；(b) `X-Telegram-Bot-Api-Secret-Token` header 缺失或不对；(c) tenant 已删除。已 `/pause` 的 tenant 不返回 404——它返回 200 并丢弃该条消息（正常情况下 pause 已注销 webhook，Telegram 根本不会再投递）。
 
 **Q: 管家 bot 不响应怎么办？**
 检查 `npx wrangler tail` 日志；用 `/admin/registerWebhook?s=...` 重新注册；确认 `ENV_MANAGER_BOT_TOKEN` 正确。
@@ -441,16 +445,16 @@ npx wrangler kv namespace delete --binding=nfd
 在管家 bot 里 `/info <他的bot>` 看 `status`；如果 paused 就 `/resume`；或让朋友重新 `/setup`。
 
 **Q: 朋友能看到我的 bot 数据吗？**
-不能。每个 tenant 在 KV 内完全隔离（`tenant:{botId}:` 前缀），且只有 owner 自己能用 `/info /pause` 等命令。Host 能用 `/host_list` 看到所有 tenant **存在**，但消息内容并不持久化保存。
+其他朋友不能——每个 tenant 在 KV 内完全隔离（`tenant:{botId}:` 前缀），普通用户的 `/info /pause` 等命令只作用于自己拥有的 bot。但 **host 是超级管理员**：除 `/host_*` 命令外，host 的普通管理命令也能作用于任意 tenant（毕竟 host 持有 master key 与 Cloudflare 账号，这不是额外的信任让步）。消息内容任何人都看不到——它不持久化保存。
 
 **Q: Cloudflare 免费档够用吗？**
-通常够。Workers 免费 10 万请求/天；KV 免费 1000 写入/天。每条访客消息约 3-4 次 KV 写入。10 个朋友 × 每天 50 条 = 1500-2000 写，可能略超；超出后开 Workers Paid（$5/月，1M 写/月）。
+小规模够。Workers 免费 10 万请求/天；KV 免费 **1000 写入/天（全平台共享，00:00 UTC 重置）**。每条送达的访客消息约 3 次 KV 写入（被拉黑/超限/垃圾消息不消耗写入）。注意：**超出免费额度后当日的 KV 写入会直接失败**，表现为消息静默丢失，而不是"略微超支"。10 个朋友 × 每天 50 条 ≈ 1500 写已明显超出——这种量级请开 Workers Paid（$5/月，1M 写/月）。
 
 **Q: 怎么本地开发？**
 创建 `.dev.vars`（已 gitignore）镜像 4 个必填 secret，然后 `npx wrangler dev`。
 
 **Q: 为什么访客在 60s 内连发多条只看到前 5 条到达？**
-限速保护：每访客每 60s 最多 5 条。超出的会被静默丢弃，访客不会收到任何提示（避免给攻击者反馈）。
+限速保护：每访客每 60s 最多 5 条。超出的会被静默丢弃，访客不会收到任何提示（避免给攻击者反馈）。相册（media group）整组只计 1 条额度，2-10 张的相册会完整送达。
 
 ---
 

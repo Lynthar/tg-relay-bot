@@ -180,10 +180,10 @@ export const T = {
         "You can't onboard the manager bot's own token. Use a different bot's token from BotFather.",
     ),
     botAlreadyOnboarded: bil(
-      (username: string, ownerUid: string) =>
-        `这个 bot (@${username}) 已被 onboard，所有者 ${ownerUid}。如要重置，所有者须先 /delete ${username} --yes`,
-      (username: string, ownerUid: string) =>
-        `This bot (@${username}) is already onboarded, owned by ${ownerUid}. To reset, the owner must first /delete ${username} --yes`,
+      (username: string) =>
+        `这个 bot (@${username}) 已被 onboard。如要重置，请其所有者先 /delete ${username} --yes（或联系 host）。`,
+      (username: string) =>
+        `This bot (@${username}) is already onboarded. To reset, its owner must first /delete ${username} --yes (or contact the host).`,
     ),
     getMeFailed: bil(
       (detail: string) =>
@@ -354,6 +354,10 @@ export const T = {
       () =>
         'Cannot remove the owner. To transfer ownership, /delete the bot and have the new owner re-onboard.',
     ),
+    adminLimitReached: bil(
+      (max: number) => `每个 bot 最多 ${max} 个管理员，已达上限。`,
+      (max: number) => `A bot can have at most ${max} admins; limit reached.`,
+    ),
     adminNotInList: bil(
       (uid: string, username: string) => `${uid} 不在 @${username} 的管理员列表中。`,
       (uid: string, username: string) => `${uid} is not in @${username}'s admin list.`,
@@ -503,6 +507,12 @@ export const T = {
     checkBlock: bil(
       (uk: string, blocked: boolean) => `${uk} ${blocked ? '已屏蔽' : '未屏蔽'}`,
       (uk: string, blocked: boolean) => `${uk} ${blocked ? 'blocked' : 'not blocked'}`,
+    ),
+    commandNotRelayed: bil(
+      () =>
+        '未识别的命令，已拦截（不会发送给访客）。可用命令见 /help；如确要把以 / 开头的文本发给访客，请改写后重发。',
+      () =>
+        'Unrecognized command — intercepted, NOT sent to the guest. See /help; to send text starting with "/" to the guest, rephrase it first.',
     ),
     noMappingForReply: bil(
       () => '该转发消息已超出有效期或不存在映射，无法回复。',

@@ -3,11 +3,20 @@ import {
   RATE_LIMIT_WINDOW_SEC,
   RATE_LIMIT_MAX,
   MEDIA_GROUP_TAG_TTL_SEC,
+  DEDUP_TTL_SEC,
 } from './config';
 import * as tg from './telegram';
-import { TelegramError } from './telegram';
+import { TelegramError, parseBotCommand } from './telegram';
 import { putMsgMap, type MsgMapEntry, type ScopedKV } from './storage';
-import { userKey, isBlocked, checkRateLimit, logEvent, logError } from './security';
+import {
+  userKey,
+  isBlocked,
+  checkRateLimit,
+  markUpdateSeen,
+  tryPut,
+  logEvent,
+  logError,
+} from './security';
 import { handleAdminMessage } from './commands';
 import type { TgMessage } from './types';
 import type { TenantCfg } from './tenant';
@@ -18,6 +27,7 @@ export async function handleMessage(
   skv: ScopedKV,
   debug: boolean,
   message: TgMessage,
+  updateId: number,
 ): Promise<void> {
   if (message.chat.type !== 'private') return;
 
@@ -26,7 +36,7 @@ export async function handleMessage(
   const isAdmin = cfg.adminUids.has(senderId);
   const locale = localeFromMessage(message);
 
-  const cmd = parseCommand(text, cfg.botUsername);
+  const cmd = parseBotCommand(text, cfg.botUsername)?.cmd ?? null;
   if (cmd === 'start') {
     await tg.sendMessage(cfg.botToken, { chat_id: message.chat.id, text: cfg.startMessage });
     return;
@@ -46,7 +56,10 @@ export async function handleMessage(
     return;
   }
 
+  // The dedup mark is deferred to just before the first non-idempotent side
+  // effect (admin command / relay), so messages dropped below cost no KV writes.
   if (isAdmin) {
+    await markUpdateSeen(skv, updateId, DEDUP_TTL_SEC);
     await handleAdminMessage(cfg, skv, debug, message, locale);
     return;
   }
@@ -58,24 +71,37 @@ export async function handleMessage(
     return;
   }
 
-  const allowed = await checkRateLimit(skv, uk, RATE_LIMIT_WINDOW_SEC, RATE_LIMIT_MAX);
+  const allowed = await admitGuestMessage(skv, uk, message);
   if (!allowed) {
     logEvent(debug, 'guest_rate_limited', { uk });
     return;
   }
 
+  await markUpdateSeen(skv, updateId, DEDUP_TTL_SEC);
   await relayToAdmins(cfg, skv, debug, message, uk);
 }
 
-// Matches a leading bot command, tolerating a deep-link payload ("/start ref123",
-// how t.me/bot?start=ref123 arrives) and an explicit @botname suffix. A suffix
-// addressed to a DIFFERENT bot returns null so the text falls through to the
-// relay path untouched.
-function parseCommand(text: string, botUsername: string): string | null {
-  const m = text.match(/^\/([A-Za-z0-9_]+)(?:@(\w+))?(?:\s|$)/);
-  if (!m) return null;
-  if (m[2] && m[2].toLowerCase() !== botUsername.toLowerCase()) return null;
-  return m[1].toLowerCase();
+// Telegram delivers each item of a media group as its own update, so a legal
+// 2–10-item album would eat the whole 5/60s budget (and every item would rewrite
+// the same rate key within a second — a KV 429). Instead the album's first item
+// buys admission for the group: one rate unit covers all items sharing the
+// media_group_id, and a rejected album is rejected whole.
+async function admitGuestMessage(
+  skv: ScopedKV,
+  uk: string,
+  message: TgMessage,
+): Promise<boolean> {
+  const albumId = message.media_group_id;
+  if (!albumId) return checkRateLimit(skv, uk, RATE_LIMIT_WINDOW_SEC, RATE_LIMIT_MAX);
+  const albumKey = `album-${uk}-${albumId}`;
+  if (await skv.getString(albumKey)) return true;
+  const allowed = await checkRateLimit(skv, uk, RATE_LIMIT_WINDOW_SEC, RATE_LIMIT_MAX);
+  if (allowed) {
+    // Best-effort (concurrent first items may race): a lost marker only means one
+    // extra rate unit for the same album.
+    await tryPut(skv, albumKey, '1', MEDIA_GROUP_TAG_TTL_SEC, 'album_put');
+  }
+  return allowed;
 }
 
 async function relayToAdmins(
@@ -99,7 +125,7 @@ async function relayToAdmins(
           from_chat_id: message.chat.id,
           message_id: message.message_id,
         });
-        await putMsgMap(skv, adminId, fwd.message_id, entry, MSG_MAP_TTL_SEC);
+        await tryPutMsgMap(skv, adminId, fwd.message_id, entry);
       } else {
         const useHtml = cfg.displayMode === 'tag';
         const emitTag = message.media_group_id
@@ -112,14 +138,14 @@ async function relayToAdmins(
             text: tagText,
             ...(useHtml ? { parse_mode: 'HTML' as const, disable_web_page_preview: true } : {}),
           });
-          await putMsgMap(skv, adminId, tagMsg.message_id, entry, MSG_MAP_TTL_SEC);
+          await tryPutMsgMap(skv, adminId, tagMsg.message_id, entry);
         }
         const copied = await tg.copyMessage(cfg.botToken, {
           chat_id: adminId,
           from_chat_id: message.chat.id,
           message_id: message.message_id,
         });
-        await putMsgMap(skv, adminId, copied.message_id, entry, MSG_MAP_TTL_SEC);
+        await tryPutMsgMap(skv, adminId, copied.message_id, entry);
       }
       logEvent(debug, 'forwarded', { uk, admin: adminId });
     } catch (e) {
@@ -135,6 +161,21 @@ async function relayToAdmins(
   }
 }
 
+// Losing a mapping only degrades reply-routing for this one message — the admin
+// already received it — so a KV write throttle here must not abort delivery.
+async function tryPutMsgMap(
+  skv: ScopedKV,
+  adminId: string,
+  adminMessageId: number,
+  entry: MsgMapEntry,
+): Promise<void> {
+  try {
+    await putMsgMap(skv, adminId, adminMessageId, entry, MSG_MAP_TTL_SEC);
+  } catch (e) {
+    logError('msg_map_put', e);
+  }
+}
+
 // Per-admin dedup of the album-leader tag. Same media_group_id within the TTL emits the tag only
 // once per admin; subsequent items still get copyMessage'd. Race-prone (no SETNX), but the worst
 // case is "one extra tag or one missing tag" — never a data error.
@@ -145,7 +186,7 @@ async function shouldEmitTag(
 ): Promise<boolean> {
   const key = `mg-${adminId}-${mediaGroupId}`;
   if (await skv.getString(key)) return false;
-  await skv.put(key, '1', MEDIA_GROUP_TAG_TTL_SEC);
+  await tryPut(skv, key, '1', MEDIA_GROUP_TAG_TTL_SEC, 'mg_tag_put');
   return true;
 }
 

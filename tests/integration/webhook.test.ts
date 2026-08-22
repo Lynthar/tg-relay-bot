@@ -592,6 +592,194 @@ describe('multi-admin msg-map routing (regression: message_id is only per-chat u
   });
 });
 
+describe('dedup mark is deferred until a side effect is certain', () => {
+  it('a forwarded guest message writes the update- mark', async () => {
+    const t = await provisionTenant({ botId: '210001', ownerUid: 'owner-210001' });
+    const updateId = nid();
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: 6660, text: 'hi', updateId }),
+    );
+    await flush();
+    const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
+    expect(await skv.getString(`update-${updateId}`)).toBe('1');
+  });
+
+  it('the same update_id delivered twice forwards only once', async () => {
+    const t = await provisionTenant({ botId: '210002', ownerUid: 'owner-210002' });
+    const update = buildUpdate({ chatId: 6661, text: 'once' });
+    await postWebhook(t.botId, t.webhookSecret, update);
+    await flush();
+    await postWebhook(t.botId, t.webhookSecret, update);
+    await flush();
+    expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(1);
+  });
+
+  it('a blocked guest message writes nothing at all', async () => {
+    const t = await provisionTenant({ botId: '210003', ownerUid: 'owner-210003' });
+    const guest = 6662;
+    const uk = await userKey(guest, t.hashSecret);
+    const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
+    await skv.put(`block-${uk}`, '1');
+
+    const updateId = nid();
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: guest, text: 'spam', updateId }),
+    );
+    await flush();
+    expect(await skv.getString(`update-${updateId}`)).toBeNull();
+    expect((await skv.list('rate-')).keys.length).toBe(0);
+  });
+
+  it('a rate-limited message writes no update- mark', async () => {
+    const t = await provisionTenant({ botId: '210004', ownerUid: 'owner-210004' });
+    const guest = 6663;
+    for (let i = 0; i < 6; i++) {
+      await postWebhook(
+        t.botId,
+        t.webhookSecret,
+        buildUpdate({ chatId: guest, text: `m${i}` }),
+      );
+      await flush();
+    }
+    const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
+    expect((await skv.list('update-')).keys.length).toBe(5);
+  });
+});
+
+describe('media group counts as one rate unit (album admission)', () => {
+  it('a 10-item album is relayed whole and consumes one unit', async () => {
+    const t = await provisionTenant({ botId: '210010', ownerUid: 'owner-210010' });
+    const guest = 6670;
+    for (let i = 0; i < 10; i++) {
+      await postWebhook(
+        t.botId,
+        t.webhookSecret,
+        buildUpdate({ chatId: guest, mediaGroupId: 'album-full' }),
+      );
+      await flush();
+    }
+    expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(10);
+
+    const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
+    const uk = await userKey(guest, t.hashSecret);
+    const state = await skv.getJson<{ count: number }>(`rate-${uk}`);
+    expect(state?.count).toBe(1);
+
+    // The album left budget for ordinary messages.
+    await postWebhook(t.botId, t.webhookSecret, buildUpdate({ chatId: guest, text: 'after' }));
+    await flush();
+    expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(11);
+  });
+
+  it('an album arriving over the limit is rejected whole', async () => {
+    const t = await provisionTenant({ botId: '210011', ownerUid: 'owner-210011' });
+    const guest = 6671;
+    for (let i = 0; i < 5; i++) {
+      await postWebhook(
+        t.botId,
+        t.webhookSecret,
+        buildUpdate({ chatId: guest, text: `m${i}` }),
+      );
+      await flush();
+    }
+    for (let i = 0; i < 3; i++) {
+      await postWebhook(
+        t.botId,
+        t.webhookSecret,
+        buildUpdate({ chatId: guest, mediaGroupId: 'album-late' }),
+      );
+      await flush();
+    }
+    expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(5);
+  });
+});
+
+describe('mistyped admin commands never leak to the guest', () => {
+  async function provisionWithMapping(botId: string, adminUid: number) {
+    const t = await provisionTenant({ botId, ownerUid: String(adminUid) });
+    const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
+    const guestChat = 48000 + adminUid;
+    const uk = await userKey(guestChat, t.hashSecret);
+    await skv.put(
+      `msg-map-${adminUid}-5005`,
+      JSON.stringify({ chatId: guestChat, userKey: uk, createdAt: Date.now() }),
+    );
+    return { t, skv, uk };
+  }
+
+  async function replyAs(t: { botId: string; webhookSecret: string }, adminUid: number, text: string) {
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: adminUid, fromId: adminUid, text, replyToMessageId: 5005 }),
+    );
+    await flush();
+  }
+
+  it('/block@own_bot and /Block execute as /block', async () => {
+    const adminUid = 220001;
+    const { t, skv, uk } = await provisionWithMapping('220001', adminUid);
+    await replyAs(t, adminUid, `/block@${t.cfg.botUsername}`);
+    expect(await skv.getString(`block-${uk}`)).toBe('1');
+
+    await skv.delete(`block-${uk}`);
+    await replyAs(t, adminUid, '/Block');
+    expect(await skv.getString(`block-${uk}`)).toBe('1');
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
+  });
+
+  it('a typo ("/bloc") is intercepted, not copied to the guest', async () => {
+    const adminUid = 220002;
+    const { t, skv, uk } = await provisionWithMapping('220002', adminUid);
+    await replyAs(t, adminUid, '/bloc');
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
+    expect(await skv.getString(`block-${uk}`)).toBeNull();
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已拦截/);
+  });
+
+  it('/block with arguments is intercepted, not executed and not copied', async () => {
+    const adminUid = 220003;
+    const { t, skv, uk } = await provisionWithMapping('220003', adminUid);
+    await replyAs(t, adminUid, '/block 拉黑他');
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
+    expect(await skv.getString(`block-${uk}`)).toBeNull();
+  });
+
+  it("/block@another_bot is intercepted (admin chat, unlike the guest path)", async () => {
+    const adminUid = 220004;
+    const { t } = await provisionWithMapping('220004', adminUid);
+    await replyAs(t, adminUid, '/block@some_other_bot');
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
+  });
+
+  it('an unknown slash command without a reply is intercepted too', async () => {
+    const adminUid = 220005;
+    const t = await provisionTenant({ botId: '220005', ownerUid: String(adminUid) });
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: adminUid, fromId: adminUid, text: '/oops' }),
+    );
+    await flush();
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已拦截/);
+  });
+
+  it('guest slash text is still relayed untouched', async () => {
+    const t = await provisionTenant({ botId: '220006', ownerUid: '220007' });
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: 6680, text: '/bloc' }),
+    );
+    await flush();
+    expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(1);
+  });
+});
+
 describe('non-admin /block is treated as ordinary text', () => {
   it('no block-* key is written; the message is relayed as text', async () => {
     const t = await provisionTenant({ botId: '200006', ownerUid: '700001' });

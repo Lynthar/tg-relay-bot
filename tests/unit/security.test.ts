@@ -6,7 +6,8 @@ import {
   constantTimeEqual,
   formatError,
   isBlocked,
-  isDuplicateUpdate,
+  markUpdateSeen,
+  seenUpdate,
   setBlocked,
   userKey,
 } from '../../src/security';
@@ -74,6 +75,13 @@ describe('checkRateLimit', () => {
     expect(await checkRateLimit(skv, 'uk-a', 60, 5)).toBe(false);
     expect(await checkRateLimit(skv, 'uk-b', 60, 5)).toBe(true);
   });
+
+  it('rejections do not persist: stored count stays at max', async () => {
+    const skv = freshSkv();
+    for (let i = 0; i < 8; i++) await checkRateLimit(skv, 'uk-c', 60, 5);
+    const state = await skv.getJson<{ count: number }>('rate-uk-c');
+    expect(state?.count).toBe(5);
+  });
 });
 
 describe('blocklist', () => {
@@ -120,17 +128,18 @@ describe('formatError', () => {
   });
 });
 
-describe('isDuplicateUpdate', () => {
-  it('first call returns false, second returns true', async () => {
+describe('update dedup (seenUpdate / markUpdateSeen)', () => {
+  it('unseen until marked, seen afterwards', async () => {
     const skv = freshSkv();
-    expect(await isDuplicateUpdate(skv, 100, 60)).toBe(false);
-    expect(await isDuplicateUpdate(skv, 100, 60)).toBe(true);
+    expect(await seenUpdate(skv, 100)).toBe(false);
+    await markUpdateSeen(skv, 100, 60);
+    expect(await seenUpdate(skv, 100)).toBe(true);
   });
 
   it('distinct update_ids are independent', async () => {
     const skv = freshSkv();
-    expect(await isDuplicateUpdate(skv, 1, 60)).toBe(false);
-    expect(await isDuplicateUpdate(skv, 2, 60)).toBe(false);
-    expect(await isDuplicateUpdate(skv, 1, 60)).toBe(true);
+    await markUpdateSeen(skv, 1, 60);
+    expect(await seenUpdate(skv, 1)).toBe(true);
+    expect(await seenUpdate(skv, 2)).toBe(false);
   });
 });

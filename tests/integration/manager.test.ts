@@ -6,6 +6,7 @@ import {
   buildUpdate,
   flush,
   managerWebhookSecret,
+  nid,
   postWebhook,
   provisionLegacyTenant,
   provisionTenant,
@@ -93,6 +94,20 @@ describe('/admins', () => {
     await sendManagerCmd(400006, `/admins ${t.cfg.botUsername} add notanumber`);
     await flush();
     expect(lastReplyText()).toMatch(/纯数字/);
+  });
+
+  it('add refuses when the admin cap is reached', async () => {
+    const t = await provisionTenant({ botId: '400012', ownerUid: '400012' });
+    const stored = await getStored(env.nfd, t.botId);
+    stored!.adminUids = ['400012', ...Array.from({ length: 9 }, (_, i) => String(600000 + i))];
+    await putStored(env.nfd, t.botId, stored!);
+
+    await sendManagerCmd(400012, `/admins ${t.cfg.botUsername} add 700001`);
+    await flush();
+
+    expect(lastReplyText()).toMatch(/最多 10 个管理员/);
+    const after = await getStored(env.nfd, t.botId);
+    expect(after?.adminUids).not.toContain('700001');
   });
 
   it("non-owner cannot manage another owner's bot", async () => {
@@ -671,5 +686,45 @@ describe('i18n: English locale', () => {
     await sendManagerCmd(123456, '/whoami', 'en');
     await flush();
     expect(lastReplyText()).toMatch(/Your chat id: 123456/);
+  });
+});
+
+describe('manager dedup mark is skipped for strangers (KV write quota protection)', () => {
+  it('an uninvited stranger gets a reply but no dedup mark', async () => {
+    const updateId = nid();
+    const secret = await managerWebhookSecret();
+    await postWebhook(
+      MANAGER_BOT_ID,
+      secret,
+      buildUpdate({ chatId: 987654, text: '/whoami', updateId }),
+    );
+    await flush();
+    expect(lastReplyText()).toMatch(/987654/);
+    expect(await env.nfd.get(`manager:dedup-update-${updateId}`)).toBeNull();
+  });
+
+  it('a host message writes the dedup mark', async () => {
+    const updateId = nid();
+    const secret = await managerWebhookSecret();
+    await postWebhook(
+      MANAGER_BOT_ID,
+      secret,
+      buildUpdate({ chatId: Number(HOST_UID), text: '/whoami', updateId }),
+    );
+    await flush();
+    expect(await env.nfd.get(`manager:dedup-update-${updateId}`)).toBe('1');
+  });
+
+  it('an invited user writes the dedup mark', async () => {
+    await env.nfd.put('manager:allow-876543', '1');
+    const updateId = nid();
+    const secret = await managerWebhookSecret();
+    await postWebhook(
+      MANAGER_BOT_ID,
+      secret,
+      buildUpdate({ chatId: 876543, text: '/whoami', updateId }),
+    );
+    await flush();
+    expect(await env.nfd.get(`manager:dedup-update-${updateId}`)).toBe('1');
   });
 });

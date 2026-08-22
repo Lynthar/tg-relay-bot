@@ -1,4 +1,10 @@
-import { ALLOWED_UPDATES, MAX_TENANTS_PER_UID, type Env, type HostConfig } from './config';
+import {
+  ALLOWED_UPDATES,
+  MAX_TENANTS_PER_UID,
+  MAX_ADMINS_PER_TENANT,
+  type Env,
+  type HostConfig,
+} from './config';
 import { getEncKey } from './crypto';
 import * as tg from './telegram';
 import { TelegramError } from './telegram';
@@ -37,7 +43,7 @@ async function getState(kv: KvStore, uid: string): Promise<UserState> {
 // else on the manager bot stays open so prospective friends can run /whoami.
 const INVITE_PREFIX = 'manager:allow-';
 
-async function isInvited(kv: KvStore, uid: string): Promise<boolean> {
+export async function isInvited(kv: KvStore, uid: string): Promise<boolean> {
   return (await kv.get(INVITE_PREFIX + uid)) === '1';
 }
 
@@ -272,11 +278,7 @@ async function handleTokenInput(
   const existing = await getStored(env.nfd, botId);
   if (existing) {
     await setState(env.nfd, senderId, { step: 'idle' });
-    await reply(
-      host,
-      senderId,
-      T.manager.botAlreadyOnboarded[locale](existing.botUsername, existing.ownerUid),
-    );
+    await reply(host, senderId, T.manager.botAlreadyOnboarded[locale](existing.botUsername));
     return;
   }
 
@@ -604,6 +606,12 @@ async function handleAdmins(
   if (action === 'add') {
     if (r.cfg.adminUids.includes(uid)) {
       await reply(host, senderId, T.manager.adminAlready[locale](uid, r.cfg.botUsername));
+      return;
+    }
+    // Every admin multiplies per-message Telegram calls and msg-map writes against
+    // the platform-wide KV quota, and delivery is serial — cap it like tenants are.
+    if (r.cfg.adminUids.length >= MAX_ADMINS_PER_TENANT) {
+      await reply(host, senderId, T.manager.adminLimitReached[locale](MAX_ADMINS_PER_TENANT));
       return;
     }
     r.cfg.adminUids = [...r.cfg.adminUids, uid];

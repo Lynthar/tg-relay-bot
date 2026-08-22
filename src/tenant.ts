@@ -1,6 +1,7 @@
 import { encrypt, decrypt, randomHex } from './crypto';
 import * as tg from './telegram';
 import { TelegramError } from './telegram';
+import { logError } from './security';
 import type { DisplayMode } from './types';
 import type { KvStore, KvListResult } from './storage';
 
@@ -232,11 +233,16 @@ export async function deleteTenant(
 ): Promise<number> {
   const raw = await getStored(kv, botId);
   if (raw) {
+    // Best-effort only: neither an unreachable Telegram nor an undecryptable
+    // token (changed/lost master key) may block the local purge — otherwise a
+    // wrong key would wedge /delete and /host_purge and make re-/setup
+    // impossible. An orphaned webhook keeps pointing here (harmless 404s) until
+    // the next setWebhook or a BotFather token revoke replaces it.
     try {
       const token = await decryptToken(raw, encKey);
       await tg.deleteWebhook(token);
     } catch (e) {
-      if (!(e instanceof TelegramError)) throw e;
+      if (!(e instanceof TelegramError)) logError('delete_webhook', e, { botId });
     }
   }
   let total = 0;

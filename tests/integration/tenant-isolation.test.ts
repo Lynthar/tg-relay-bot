@@ -3,7 +3,7 @@ import { env } from 'cloudflare:test';
 import { buildUpdate, flush, postWebhook, provisionTenant, tgMock } from '../helpers';
 import { userKey } from '../../src/security';
 import { ScopedKV, getMsgMap, putMsgMap } from '../../src/storage';
-import { deleteTenant } from '../../src/tenant';
+import { deleteTenant, getStored, putStored } from '../../src/tenant';
 import { getEncKey } from '../../src/crypto';
 
 beforeAll(() => tgMock.install());
@@ -68,5 +68,24 @@ describe('tenant isolation', () => {
     expect(await env.nfd.get(`tenant:${a.botId}:cfg`)).toBeNull();
     expect(await skvB.getString('test-key')).toBe('B');
     expect(await env.nfd.get(`tenant:${b.botId}:cfg`)).not.toBeNull();
+  });
+
+  it('deleteTenant purges local data even when the token cannot be decrypted', async () => {
+    const a = await provisionTenant({ botId: '300009', ownerUid: '300009' });
+    const stored = await getStored(env.nfd, a.botId);
+    // Valid base64, undecryptable content — what a record looks like after the
+    // master key was changed.
+    stored!.tokenEnc = 'A'.repeat(64);
+    await putStored(env.nfd, a.botId, stored!);
+    const skv = new ScopedKV(env.nfd, `tenant:${a.botId}:`);
+    await skv.put('msg-map-1-1', '{}');
+
+    const encKey = await getEncKey(env.ENV_MASTER_ENC_KEY);
+    const purged = await deleteTenant(env.nfd, a.botId, encKey);
+
+    expect(purged).toBeGreaterThanOrEqual(2);
+    expect(await env.nfd.get(`tenant:${a.botId}:cfg`)).toBeNull();
+    // deleteWebhook was skipped (token undecryptable), never attempted with garbage.
+    expect(tgMock.getCallsByMethod('deleteWebhook').length).toBe(0);
   });
 });

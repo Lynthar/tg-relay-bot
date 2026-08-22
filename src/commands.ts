@@ -1,10 +1,12 @@
 import * as tg from './telegram';
-import { TelegramError } from './telegram';
+import { TelegramError, parseBotCommand } from './telegram';
 import { getMsgMap, getLegacyMsgMap, type ScopedKV } from './storage';
 import { setBlocked, clearBlocked, isBlocked, logError, logEvent } from './security';
 import type { TgMessage } from './types';
 import type { TenantCfg } from './tenant';
 import { type Locale, T } from './i18n';
+
+type ReplyCmd = 'block' | 'unblock' | 'checkblock';
 
 export async function handleAdminMessage(
   cfg: TenantCfg,
@@ -14,22 +16,39 @@ export async function handleAdminMessage(
   locale: Locale,
 ): Promise<void> {
   const text = message.text ?? '';
-  if (text === '/status') {
+  const parsed = parseBotCommand(text, cfg.botUsername);
+  if (parsed?.cmd === 'status') {
     await handleStatus(cfg, skv, message);
     return;
   }
-  if (text === '/blocklist') {
+  if (parsed?.cmd === 'blocklist') {
     await handleBlocklist(cfg, skv, message, locale);
     return;
   }
   // Intercepted before the reply path on purpose: replying to a forward with
   // "/unblock <key>" must act as a command, not get copied to the guest.
-  const unblockArg = text.match(/^\/unblock\s+(\S+)$/);
-  if (unblockArg) {
-    await handleUnblockByKey(cfg, skv, debug, message, unblockArg[1], locale);
+  if (parsed?.cmd === 'unblock' && parsed.args) {
+    await handleUnblockByKey(cfg, skv, debug, message, parsed.args.split(/\s+/)[0], locale);
     return;
   }
-  await handleAdminReply(cfg, skv, debug, message, locale);
+  const replyCmd = asReplyCmd(parsed);
+  // Anything else that still looks like a command — a typo ("/bloc"), stray
+  // arguments ("/block him"), a foreign @suffix — is refused instead of being
+  // copied to the guest, which would leak the admin's moderation intent.
+  if (!replyCmd && text.startsWith('/')) {
+    await tg.sendMessage(cfg.botToken, {
+      chat_id: message.chat.id,
+      text: T.commands.commandNotRelayed[locale](),
+    });
+    return;
+  }
+  await handleAdminReply(cfg, skv, debug, message, locale, replyCmd);
+}
+
+function asReplyCmd(parsed: { cmd: string; args: string } | null): ReplyCmd | null {
+  if (!parsed || parsed.args) return null;
+  const { cmd } = parsed;
+  return cmd === 'block' || cmd === 'unblock' || cmd === 'checkblock' ? cmd : null;
 }
 
 const USER_KEY_RE = /^[0-9a-f]{32}$/;
@@ -137,6 +156,7 @@ async function handleAdminReply(
   debug: boolean,
   message: TgMessage,
   locale: Locale,
+  cmd: ReplyCmd | null,
 ): Promise<void> {
   const reply = message.reply_to_message;
   if (!reply) {
@@ -147,11 +167,9 @@ async function handleAdminReply(
     return;
   }
 
-  const text = message.text ?? '';
-  const cmdMatch = text.match(/^\/(block|unblock|checkblock)$/);
   const entry = await lookupEntry(cfg, skv, String(message.chat.id), reply.message_id);
 
-  if (cmdMatch) {
+  if (cmd) {
     if (!entry) {
       await tg.sendMessage(cfg.botToken, {
         chat_id: message.chat.id,
@@ -159,7 +177,6 @@ async function handleAdminReply(
       });
       return;
     }
-    const cmd = cmdMatch[1];
     if (cmd === 'block') {
       await setBlocked(skv, entry.userKey);
       logEvent(debug, 'block_set', { uk: entry.userKey });

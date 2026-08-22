@@ -8,9 +8,9 @@ import {
 import { getEncKey } from './crypto';
 import { getTenant, type TenantCfg } from './tenant';
 import { handleMessage as handleTenantMessage } from './relay';
-import { handleManagerMessage } from './manager';
+import { handleManagerMessage, isInvited } from './manager';
 import { setWebhook, deleteWebhook, TelegramError } from './telegram';
-import { isDuplicateUpdate, constantTimeEqual, logError } from './security';
+import { seenUpdate, markUpdateSeen, constantTimeEqual, logError } from './security';
 import { ScopedKV } from './storage';
 import type { TgUpdate } from './types';
 
@@ -102,7 +102,16 @@ async function handleWebhook(
   }
 
   const encKey = await getEncKey(host.masterEncKey);
-  const tenant = await getTenant(env.nfd, botId, encKey);
+  let tenant: TenantCfg | null;
+  try {
+    tenant = await getTenant(env.nfd, botId, encKey);
+  } catch (e) {
+    // Undecryptable cfg (wrong master key / corrupt record): fail loud with a
+    // structured log line; the 5xx keeps Telegram retrying, so updates start
+    // flowing again once the key is restored.
+    logError('tenant_load', e, { botId });
+    return new Response('error', { status: 500 });
+  }
   if (!tenant) return notFound();
   if (!constantTimeEqual(headerSecret, tenant.webhookSecret)) return notFound();
   if (tenant.paused) return new Response('ok');
@@ -128,7 +137,14 @@ async function processManagerUpdate(
     if (!update.message) return;
     if (update.message.chat.type !== 'private') return;
     const skv = new ScopedKV(env.nfd, 'manager:dedup-');
-    if (await isDuplicateUpdate(skv, update.update_id, DEDUP_TTL_SEC)) return;
+    if (await seenUpdate(skv, update.update_id)) return;
+    // Strangers get replies but no dedup mark: their handling is stateless, so a
+    // rare duplicate delivery merely repeats a reply — cheaper than letting
+    // uninvited spam consume the platform-wide daily KV write quota.
+    const senderId = String(update.message.chat.id);
+    if (senderId === host.hostUid || (await isInvited(env.nfd, senderId))) {
+      await markUpdateSeen(skv, update.update_id, DEDUP_TTL_SEC);
+    }
     await handleManagerMessage(env, host, baseUrl, update.message);
   } catch (e) {
     logError('manager_update', e);
@@ -146,8 +162,10 @@ async function processTenantUpdate(
     if (!update.message) return;
     if (update.message.chat.type !== 'private') return;
     const skv = new ScopedKV(env.nfd, `tenant:${tenant.botId}:`);
-    if (await isDuplicateUpdate(skv, update.update_id, DEDUP_TTL_SEC)) return;
-    await handleTenantMessage(tenant, skv, host.debug, update.message);
+    if (await seenUpdate(skv, update.update_id)) return;
+    // The matching markUpdateSeen happens inside the relay, after the cheap drop
+    // decisions (blocked / rate-limited), so dropped junk costs no KV writes.
+    await handleTenantMessage(tenant, skv, host.debug, update.message, update.update_id);
   } catch (e) {
     logError('tenant_update', e, { botId: tenant.botId });
   }

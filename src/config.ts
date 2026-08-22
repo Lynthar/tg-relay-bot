@@ -25,6 +25,9 @@ export const MEDIA_GROUP_TAG_TTL_SEC = 60;
 // Per-owner tenant cap (host exempt). KV write quota is platform-wide, so one
 // over-enthusiastic friend must not be able to crowd out everyone else.
 export const MAX_TENANTS_PER_UID = 3;
+// Same quota logic per tenant: each admin adds Telegram calls + msg-map writes
+// to every relayed message, and delivery is serial.
+export const MAX_ADMINS_PER_TENANT = 10;
 // Only `message` is ever processed; restricting the webhook saves Worker
 // invocations (edited_message, callback_query, ... are never delivered).
 export const ALLOWED_UPDATES = ['message'];

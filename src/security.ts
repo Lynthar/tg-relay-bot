@@ -41,6 +41,24 @@ interface RateLimitState {
   count: number;
 }
 
+// Relay-hot-path put: a KV write throttle (KV allows only 1 write/sec to the same
+// key and throws 429 beyond that) or an exhausted daily write quota must degrade
+// the bookkeeping this key carries — never abort processing the guest's message.
+// Config and blocklist writes stay fail-loud; do not route them through here.
+export async function tryPut(
+  skv: ScopedKV,
+  key: string,
+  value: string,
+  ttlSec: number,
+  event: string,
+): Promise<void> {
+  try {
+    await skv.put(key, value, ttlSec);
+  } catch (e) {
+    logError(event, e);
+  }
+}
+
 export async function checkRateLimit(
   skv: ScopedKV,
   uk: string,
@@ -54,8 +72,13 @@ export async function checkRateLimit(
   const next: RateLimitState = fresh
     ? { start: now, count: 1 }
     : { start: cur.start, count: cur.count + 1 };
-  await skv.put(k, JSON.stringify(next), windowSec);
-  return next.count <= max;
+  if (next.count > max) return false;
+  // Persisted only for admitted messages: once over the limit the stored count no
+  // longer changes the decision (it stays above max until the window lapses), and
+  // skipping the write keeps a flood from hammering this key — rejections cost
+  // zero KV writes.
+  await tryPut(skv, k, JSON.stringify(next), windowSec, 'rate_put');
+  return true;
 }
 
 export async function isBlocked(skv: ScopedKV, uk: string): Promise<boolean> {
@@ -70,16 +93,23 @@ export async function clearBlocked(skv: ScopedKV, uk: string): Promise<void> {
   await skv.delete(`block-${uk}`);
 }
 
-export async function isDuplicateUpdate(
+// Webhook dedup is split into check and mark so the mark (a KV write) can be
+// deferred until the update is known to cause a non-idempotent side effect.
+// Dropped messages (blocked / rate-limited / uninvited spam) are processed
+// idempotently, so leaving them unmarked is harmless — and it means junk traffic
+// consumes zero writes of the platform-wide daily KV quota.
+export async function seenUpdate(skv: ScopedKV, updateId: number): Promise<boolean> {
+  return (await skv.getString(`update-${updateId}`)) !== null;
+}
+
+export async function markUpdateSeen(
   skv: ScopedKV,
   updateId: number,
   ttlSec: number,
-): Promise<boolean> {
-  const k = `update-${updateId}`;
-  const seen = await skv.getString(k);
-  if (seen) return true;
-  await skv.put(k, '1', ttlSec);
-  return false;
+): Promise<void> {
+  // Fail-open: losing the mark risks (rare) double-processing of a Telegram
+  // re-delivery; failing loud would drop the message outright.
+  await tryPut(skv, `update-${updateId}`, '1', ttlSec, 'dedup_put');
 }
 
 export function logEvent(

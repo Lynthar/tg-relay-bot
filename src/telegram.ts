@@ -16,6 +16,11 @@ export class TelegramError extends Error {
   }
 }
 
+// A hung connection would otherwise stall the whole per-admin delivery loop for
+// as long as the runtime lets the invocation live; Telegram API calls normally
+// complete in well under a second.
+const API_TIMEOUT_MS = 15_000;
+
 async function call<T>(token: string, method: string, body: unknown): Promise<T> {
   let resp: Response;
   try {
@@ -23,9 +28,13 @@ async function call<T>(token: string, method: string, body: unknown): Promise<T>
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
     });
-  } catch {
-    throw new TelegramError(method, 'network');
+  } catch (e) {
+    throw new TelegramError(
+      method,
+      e instanceof DOMException && e.name === 'TimeoutError' ? 'timeout' : 'network',
+    );
   }
   let data: TgResponse<T>;
   try {
@@ -48,6 +57,21 @@ export interface TgMe {
 
 export function getMe(token: string): Promise<TgMe> {
   return call<TgMe>(token, 'getMe', {});
+}
+
+// Parses a leading bot command, tolerating trailing arguments ("/start ref123",
+// how t.me/bot?start=ref123 arrives) and an explicit @botname suffix. A suffix
+// addressed to a DIFFERENT bot returns null so callers treat the text as plain
+// text. Shared by the relay's global commands and the tenant admin commands so
+// "/Block", "/block@this_bot" and "/block <note>" all parse the same way.
+export function parseBotCommand(
+  text: string,
+  botUsername: string,
+): { cmd: string; args: string } | null {
+  const m = text.match(/^\/([A-Za-z0-9_]+)(?:@(\w+))?(?:\s+([\s\S]*))?$/);
+  if (!m) return null;
+  if (m[2] && m[2].toLowerCase() !== botUsername.toLowerCase()) return null;
+  return { cmd: m[1].toLowerCase(), args: (m[3] ?? '').trim() };
 }
 
 export function sendMessage(
