@@ -1,11 +1,20 @@
 name = "tg-relay-bot"
-main = "src/index.ts"
+main = "src/worker.ts"
 compatibility_date = "2025-09-01"
 
 [[kv_namespaces]]
 binding = "nfd"
 id = "c880f077fa9f49678b9f4815a85a7e4f"
 
+# ─── Required plain config ─────────────────────────────────────────────────
+#   ENV_PUBLIC_BASE_URL    The https:// origin Telegram reaches this Worker at;
+#                          every webhook target is built from it. Not a secret —
+#                          set it right here:
+# [vars]
+# ENV_PUBLIC_BASE_URL = "https://<your-worker>.workers.dev"
+#                          Unset ⇒ every request returns 404 and a `config`
+#                          error is logged (visible in `wrangler tail`).
+#
 # ─── Required secrets (set via `wrangler secret put <name>`) ───────────────
 #   ENV_MANAGER_BOT_TOKEN  Manager bot token (a SEPARATE BotFather bot,
 #                          e.g. @YourPrefixRelayManagerBot). Friends talk to

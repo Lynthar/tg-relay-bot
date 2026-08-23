@@ -132,6 +132,10 @@ dist
 
 todo.md
 CLAUDE.md
+
+# Docker
+data/
+
 # Cloudflare Workers / wrangler
 .dev.vars
 .wrangler/

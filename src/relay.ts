@@ -81,11 +81,9 @@ export async function handleMessage(
   await relayToAdmins(cfg, skv, debug, message, uk);
 }
 
-// Telegram delivers each item of a media group as its own update, so a legal
-// 2–10-item album would eat the whole 5/60s budget (and every item would rewrite
-// the same rate key within a second — a KV 429). Instead the album's first item
-// buys admission for the group: one rate unit covers all items sharing the
-// media_group_id, and a rejected album is rejected whole.
+// Admission is per album, not per item: Telegram delivers each item as its own update, so counting
+// them would cut a legal 10-item album to 5 and rewrite the same rate key within a second (KV 429).
+// The first item buys admission for the whole media_group_id; a rejected album is rejected whole.
 async function admitGuestMessage(
   skv: ScopedKV,
   uk: string,

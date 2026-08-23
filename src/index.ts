@@ -1,5 +1,6 @@
+import { Hono } from 'hono';
+import type { Context } from 'hono';
 import {
-  parseHostConfig,
   ALLOWED_UPDATES,
   DEDUP_TTL_SEC,
   type Env,
@@ -14,91 +15,96 @@ import { seenUpdate, markUpdateSeen, constantTimeEqual, logError } from './secur
 import { ScopedKV } from './storage';
 import type { TgUpdate } from './types';
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    let host: HostConfig;
-    try {
-      host = await parseHostConfig(env);
-    } catch (e) {
-      logError('config', e);
-      return notFound();
-    }
+export interface AppDeps {
+  env: Env;
+  host: HostConfig;
+}
 
-    const url = new URL(request.url);
-    const baseUrl = `${url.protocol}//${url.hostname}`;
-    const path = url.pathname;
+export function buildApp(deps: AppDeps): Hono {
+  const { env, host } = deps;
+  const app = new Hono();
 
-    const whMatch = path.match(/^\/wh\/(\d+)$/);
-    if (whMatch) {
-      return handleWebhook(request, ctx, env, host, baseUrl, whMatch[1]);
-    }
+  app.get('/healthz', (c) => c.json({ ok: true }));
 
-    if (path === '/admin/registerWebhook') {
-      return handleAdmin(request, host, async () => {
-        const target = `${baseUrl}/wh/${host.managerBotId}`;
-        await setWebhook(host.managerBotToken, {
-          url: target,
-          secret_token: host.managerWebhookSecret,
-          allowed_updates: ALLOWED_UPDATES,
-        });
-        return new Response(`manager webhook registered at ${target}`);
+  // botId path constraint: digits only. Anything else falls through to the 404 handler.
+  app.post('/wh/:botId{[0-9]+}', async (c) => handleWebhook(c, env, host));
+
+  app.get('/admin/registerWebhook', async (c) =>
+    handleAdmin(c, host, async () => {
+      const target = `${host.publicBaseUrl}/wh/${host.managerBotId}`;
+      await setWebhook(host.managerBotToken, {
+        url: target,
+        secret_token: host.managerWebhookSecret,
+        allowed_updates: ALLOWED_UPDATES,
       });
-    }
-    if (path === '/admin/unRegisterWebhook') {
-      return handleAdmin(request, host, async () => {
-        await deleteWebhook(host.managerBotToken);
-        return new Response('manager webhook removed');
-      });
-    }
-    return notFound();
-  },
-} satisfies ExportedHandler<Env>;
+      return c.text(`manager webhook registered at ${target}`);
+    }),
+  );
 
-function notFound(): Response {
-  return new Response('Not found', { status: 404 });
+  app.get('/admin/unRegisterWebhook', async (c) =>
+    handleAdmin(c, host, async () => {
+      await deleteWebhook(host.managerBotToken);
+      return c.text('manager webhook removed');
+    }),
+  );
+
+  app.notFound((c) => c.text('Not found', 404));
+
+  return app;
+}
+
+// Workers kill pending work once the response is sent unless it is registered via
+// waitUntil; on Node there is no executionCtx (the getter throws) and the event
+// loop keeps the promise alive on its own.
+function dispatch(c: Context, work: Promise<void>, event: string): void {
+  const bg = work.catch((e) => logError(event, e));
+  try {
+    c.executionCtx.waitUntil(bg);
+  } catch {
+    /* Node */
+  }
 }
 
 async function handleAdmin(
-  request: Request,
+  c: Context,
   host: HostConfig,
   action: () => Promise<Response>,
 ): Promise<Response> {
-  if (!host.adminSecret) return notFound();
-  const provided = new URL(request.url).searchParams.get('s') ?? '';
-  if (!constantTimeEqual(provided, host.adminSecret)) return notFound();
+  if (!host.adminSecret) return c.text('Not found', 404);
+  const provided = c.req.query('s') ?? '';
+  if (!constantTimeEqual(provided, host.adminSecret)) return c.text('Not found', 404);
   try {
     return await action();
   } catch (e) {
     if (e instanceof TelegramError) {
       logError('admin_action', e);
-      return new Response(`telegram error: ${e.detail}`, { status: 502 });
+      return c.text(`telegram error: ${e.detail}`, 502);
     }
     logError('admin_action', e);
-    return new Response('error', { status: 500 });
+    return c.text('error', 500);
   }
 }
 
 async function handleWebhook(
-  request: Request,
-  ctx: ExecutionContext,
+  c: Context,
   env: Env,
   host: HostConfig,
-  baseUrl: string,
-  botId: string,
 ): Promise<Response> {
-  if (request.method !== 'POST') return notFound();
-  const headerSecret = request.headers.get('X-Telegram-Bot-Api-Secret-Token') ?? '';
+  const botId = c.req.param('botId') as string;
+  const headerSecret = c.req.header('X-Telegram-Bot-Api-Secret-Token') ?? '';
 
   if (botId === host.managerBotId) {
-    if (!constantTimeEqual(headerSecret, host.managerWebhookSecret)) return notFound();
+    if (!constantTimeEqual(headerSecret, host.managerWebhookSecret)) {
+      return c.text('Not found', 404);
+    }
     let update: TgUpdate;
     try {
-      update = (await request.json()) as TgUpdate;
+      update = (await c.req.json()) as TgUpdate;
     } catch {
-      return new Response('ok');
+      return c.text('ok');
     }
-    ctx.waitUntil(processManagerUpdate(env, host, baseUrl, update));
-    return new Response('ok');
+    dispatch(c, processManagerUpdate(env, host, update), 'bg_manager');
+    return c.text('ok');
   }
 
   const encKey = await getEncKey(host.masterEncKey);
@@ -110,26 +116,27 @@ async function handleWebhook(
     // structured log line; the 5xx keeps Telegram retrying, so updates start
     // flowing again once the key is restored.
     logError('tenant_load', e, { botId });
-    return new Response('error', { status: 500 });
+    return c.text('error', 500);
   }
-  if (!tenant) return notFound();
-  if (!constantTimeEqual(headerSecret, tenant.webhookSecret)) return notFound();
-  if (tenant.paused) return new Response('ok');
+  if (!tenant) return c.text('Not found', 404);
+  if (!constantTimeEqual(headerSecret, tenant.webhookSecret)) {
+    return c.text('Not found', 404);
+  }
+  if (tenant.paused) return c.text('ok');
 
   let update: TgUpdate;
   try {
-    update = (await request.json()) as TgUpdate;
+    update = (await c.req.json()) as TgUpdate;
   } catch {
-    return new Response('ok');
+    return c.text('ok');
   }
-  ctx.waitUntil(processTenantUpdate(env, host, tenant, update));
-  return new Response('ok');
+  dispatch(c, processTenantUpdate(env, host, tenant, update), 'bg_tenant');
+  return c.text('ok');
 }
 
 async function processManagerUpdate(
   env: Env,
   host: HostConfig,
-  baseUrl: string,
   update: TgUpdate,
 ): Promise<void> {
   try {
@@ -145,7 +152,7 @@ async function processManagerUpdate(
     if (senderId === host.hostUid || (await isInvited(env.nfd, senderId))) {
       await markUpdateSeen(skv, update.update_id, DEDUP_TTL_SEC);
     }
-    await handleManagerMessage(env, host, baseUrl, update.message);
+    await handleManagerMessage(env, host, update.message);
   } catch (e) {
     logError('manager_update', e);
   }

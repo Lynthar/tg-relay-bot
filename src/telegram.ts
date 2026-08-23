@@ -59,11 +59,9 @@ export function getMe(token: string): Promise<TgMe> {
   return call<TgMe>(token, 'getMe', {});
 }
 
-// Parses a leading bot command, tolerating trailing arguments ("/start ref123",
-// how t.me/bot?start=ref123 arrives) and an explicit @botname suffix. A suffix
-// addressed to a DIFFERENT bot returns null so callers treat the text as plain
-// text. Shared by the relay's global commands and the tenant admin commands so
-// "/Block", "/block@this_bot" and "/block <note>" all parse the same way.
+// Parses a leading bot command: case-insensitive, tolerates trailing arguments ("/start ref123"),
+// validates an explicit @botname suffix. A suffix addressed to a DIFFERENT bot returns null so
+// callers treat the text as plain text — otherwise this bot would run another bot's commands.
 export function parseBotCommand(
   text: string,
   botUsername: string,

@@ -41,10 +41,9 @@ interface RateLimitState {
   count: number;
 }
 
-// Relay-hot-path put: a KV write throttle (KV allows only 1 write/sec to the same
-// key and throws 429 beyond that) or an exhausted daily write quota must degrade
-// the bookkeeping this key carries — never abort processing the guest's message.
-// Config and blocklist writes stay fail-loud; do not route them through here.
+// Relay-hot-path put: a write throttle (KV allows 1 write/sec per key, 429 beyond) or an exhausted
+// daily quota must degrade this bookkeeping, never abort the guest's message. Config and blocklist
+// writes stay fail-loud — dropped silently, a /block would look applied while it is not.
 export async function tryPut(
   skv: ScopedKV,
   key: string,
@@ -73,10 +72,9 @@ export async function checkRateLimit(
     ? { start: now, count: 1 }
     : { start: cur.start, count: cur.count + 1 };
   if (next.count > max) return false;
-  // Persisted only for admitted messages: once over the limit the stored count no
-  // longer changes the decision (it stays above max until the window lapses), and
-  // skipping the write keeps a flood from hammering this key — rejections cost
-  // zero KV writes.
+  // Persisted only for admitted messages: over the limit the stored count no longer changes the
+  // decision (it stays above max until the window lapses), and skipping the write keeps a flood
+  // from hammering this key.
   await tryPut(skv, k, JSON.stringify(next), windowSec, 'rate_put');
   return true;
 }
@@ -93,11 +91,9 @@ export async function clearBlocked(skv: ScopedKV, uk: string): Promise<void> {
   await skv.delete(`block-${uk}`);
 }
 
-// Webhook dedup is split into check and mark so the mark (a KV write) can be
-// deferred until the update is known to cause a non-idempotent side effect.
-// Dropped messages (blocked / rate-limited / uninvited spam) are processed
-// idempotently, so leaving them unmarked is harmless — and it means junk traffic
-// consumes zero writes of the platform-wide daily KV quota.
+// Dedup is split into check and mark so the mark (a KV write) is deferred until the update is known
+// to cause a non-idempotent side effect. Dropped updates (blocked / rate-limited / spam) are handled
+// idempotently, so leaving them unmarked is harmless and costs junk traffic zero writes.
 export async function seenUpdate(skv: ScopedKV, updateId: number): Promise<boolean> {
   return (await skv.getString(`update-${updateId}`)) !== null;
 }

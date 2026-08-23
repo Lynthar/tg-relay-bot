@@ -4,15 +4,26 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
+    "dev:worker": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
     "test": "vitest run",
+    "test:worker": "vitest run --config vitest.workers.config.ts",
     "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.3",
+    "better-sqlite3": "^12.10.0",
+    "hono": "^4.12.22",
+    "tsx": "^4.22.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260821.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20.19.41",
     "typescript": "^5.7.0",
     "vitest": "^4.1.6",
     "wrangler": "^4.125.0"

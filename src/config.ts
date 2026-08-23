@@ -1,8 +1,11 @@
+import type { KvStore } from './storage';
+
 export interface Env {
-  nfd: KVNamespace;
+  nfd: KvStore;
   ENV_MANAGER_BOT_TOKEN: string;
   ENV_HOST_UID: string;
   ENV_MASTER_ENC_KEY: string;
+  ENV_PUBLIC_BASE_URL: string;
   ENV_ADMIN_SECRET?: string;
   ENV_DEBUG?: string;
 }
@@ -13,6 +16,7 @@ export interface HostConfig {
   managerWebhookSecret: string;
   hostUid: string;
   masterEncKey: string;
+  publicBaseUrl: string;
   adminSecret: string | null;
   debug: boolean;
 }
@@ -40,6 +44,15 @@ export async function parseHostConfig(env: Env): Promise<HostConfig> {
   const managerBotToken = required('ENV_MANAGER_BOT_TOKEN', env.ENV_MANAGER_BOT_TOKEN);
   const hostUid = required('ENV_HOST_UID', env.ENV_HOST_UID).trim();
   const masterEncKey = required('ENV_MASTER_ENC_KEY', env.ENV_MASTER_ENC_KEY);
+  const publicBaseUrlRaw = required(
+    'ENV_PUBLIC_BASE_URL',
+    env.ENV_PUBLIC_BASE_URL,
+  ).trim();
+  if (!/^https:\/\//.test(publicBaseUrlRaw)) {
+    throw new Error('ENV_PUBLIC_BASE_URL must start with https://');
+  }
+  // Telegram appends `/wh/{botId}` to this; trailing slashes would produce `//wh/...`.
+  const publicBaseUrl = publicBaseUrlRaw.replace(/\/+$/, '');
 
   const m = managerBotToken.match(/^(\d+):/);
   if (!m) throw new Error('ENV_MANAGER_BOT_TOKEN format invalid');
@@ -51,6 +64,7 @@ export async function parseHostConfig(env: Env): Promise<HostConfig> {
     managerWebhookSecret: await deriveManagerWebhookSecret(managerBotToken),
     hostUid,
     masterEncKey,
+    publicBaseUrl,
     adminSecret: env.ENV_ADMIN_SECRET ?? null,
     debug: env.ENV_DEBUG === '1',
   };

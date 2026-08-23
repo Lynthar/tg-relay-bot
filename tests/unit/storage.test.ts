@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { env } from 'cloudflare:test';
+import { env } from '../helpers';
 import { ScopedKV, getLegacyMsgMap, getMsgMap, putMsgMap } from '../../src/storage';
 
 const fresh = (): ScopedKV => new ScopedKV(env.nfd, `test:st:${crypto.randomUUID()}:`);

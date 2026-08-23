@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { env } from 'cloudflare:test';
 import {
   MANAGER_BOT_ID,
   buildUpdate,
+  env,
   flush,
   getWebhook,
   nid,

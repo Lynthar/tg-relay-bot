@@ -1,5 +1,7 @@
-import { env, SELF } from 'cloudflare:test';
+import { buildApp } from '../src/index';
+import { parseHostConfig, type Env } from '../src/config';
 import { encrypt, getEncKey } from '../src/crypto';
+import { MemoryKvStore } from '../src/kv/memory';
 import { createTenant, putStored, type StoredTenantCfg } from '../src/tenant';
 import type { DisplayMode, TgUpdate } from '../src/types';
 
@@ -7,6 +9,18 @@ export const MANAGER_BOT_ID = '111111';
 export const MANAGER_TOKEN = '111111:test-manager-token-aaaa';
 export const HOST_UID = '999999';
 export const ADMIN_SECRET = 'test-admin-secret';
+export const PUBLIC_BASE_URL = 'https://test.example.com';
+
+// Module-level Env shared across all tests in a worker. Tests use unique botIds /
+// scope prefixes to avoid cross-test interference.
+export const env: Env = {
+  nfd: new MemoryKvStore(),
+  ENV_MANAGER_BOT_TOKEN: MANAGER_TOKEN,
+  ENV_HOST_UID: HOST_UID,
+  ENV_MASTER_ENC_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+  ENV_PUBLIC_BASE_URL: PUBLIC_BASE_URL,
+  ENV_ADMIN_SECRET: ADMIN_SECRET,
+};
 
 let cachedManagerSecret: string | null = null;
 export async function managerWebhookSecret(): Promise<string> {
@@ -122,7 +136,25 @@ export function buildUpdate(b: UpdateBuilder): TgUpdate {
 }
 
 export function webhookUrl(botId: string): string {
-  return `https://test.example.com/wh/${botId}`;
+  return `${PUBLIC_BASE_URL}/wh/${botId}`;
+}
+
+// Lazy singleton — the Hono app captures env + host at construction; rebuilding
+// per test is unnecessary because env is module-shared.
+let appPromise: ReturnType<typeof buildAppFromEnv> | null = null;
+async function buildAppFromEnv(): Promise<{ fetch: (req: Request) => Promise<Response> }> {
+  const host = await parseHostConfig(env);
+  const app = buildApp({ env, host });
+  return { fetch: (req: Request) => Promise.resolve(app.fetch(req)) };
+}
+function getApp(): Promise<{ fetch: (req: Request) => Promise<Response> }> {
+  if (!appPromise) appPromise = buildAppFromEnv();
+  return appPromise;
+}
+
+async function callApp(req: Request): Promise<Response> {
+  const app = await getApp();
+  return app.fetch(req);
 }
 
 export async function postWebhook(
@@ -132,26 +164,27 @@ export async function postWebhook(
 ): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (secret !== null) headers['X-Telegram-Bot-Api-Secret-Token'] = secret;
-  return SELF.fetch(webhookUrl(botId), {
+  const req = new Request(webhookUrl(botId), {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
   });
+  return callApp(req);
 }
 
 export async function getWebhook(botId: string): Promise<Response> {
-  return SELF.fetch(webhookUrl(botId), { method: 'GET' });
+  return callApp(new Request(webhookUrl(botId), { method: 'GET' }));
 }
 
-// Brief sleep so ctx.waitUntil background work has time to settle before assertions.
+// Brief sleep so fire-and-forget background work has time to settle before assertions.
 export function flush(ms = 30): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 // ─── Telegram API mock ───────────────────────────────────────────────────
-// v0.16 of @cloudflare/vitest-pool-workers no longer exposes a `fetchMock`
-// from `cloudflare:test`. Since `SELF` runs in the same isolate as the test,
-// we just patch `globalThis.fetch` ourselves and intercept api.telegram.org.
+// Patch globalThis.fetch to intercept api.telegram.org. Enough for both lanes:
+// the Node suite drives the Hono app in-process, and the workers smoke lane's
+// SELF runs in the same isolate as the test.
 export interface TgCall {
   url: string;
   method: string;
@@ -160,7 +193,7 @@ export interface TgCall {
 
 type TgResponder = (call: TgCall) => Response | Promise<Response>;
 
-class TgMock {
+export class TgMock {
   private originalFetch: typeof fetch | null = null;
   private calls: TgCall[] = [];
   private responder: TgResponder | null = null;

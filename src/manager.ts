@@ -68,7 +68,6 @@ async function setState(kv: KvStore, uid: string, state: UserState): Promise<voi
 export async function handleManagerMessage(
   env: Env,
   host: HostConfig,
-  baseUrl: string,
   message: TgMessage,
 ): Promise<void> {
   if (message.chat.type !== 'private') return;
@@ -91,7 +90,7 @@ export async function handleManagerMessage(
       await reply(host, senderId, T.manager.helpText[locale](isHost));
       return;
     }
-    await handleTokenInput(env, host, baseUrl, senderId, text, locale);
+    await handleTokenInput(env, host, senderId, text, locale);
     return;
   }
 
@@ -149,10 +148,10 @@ export async function handleManagerMessage(
       await handleStartMessage(env, host, senderId, args, isHost, locale);
       return;
     case 'pause':
-      await handlePauseResume(env, host, baseUrl, senderId, args, true, isHost, locale);
+      await handlePauseResume(env, host, senderId, args, true, isHost, locale);
       return;
     case 'resume':
-      await handlePauseResume(env, host, baseUrl, senderId, args, false, isHost, locale);
+      await handlePauseResume(env, host, senderId, args, false, isHost, locale);
       return;
     case 'delete':
       await handleDelete(env, host, senderId, args, isHost, locale);
@@ -204,7 +203,7 @@ export async function handleManagerMessage(
         await reply(host, senderId, T.manager.hostOnly[locale]());
         return;
       }
-      await handleHostMigrate(env, host, baseUrl, senderId, locale);
+      await handleHostMigrate(env, host, senderId, locale);
       return;
     default:
       await reply(host, senderId, T.manager.unknownCmd[locale](cmd));
@@ -246,7 +245,6 @@ async function replyChunked(
 async function handleTokenInput(
   env: Env,
   host: HostConfig,
-  baseUrl: string,
   senderId: string,
   token: string,
   locale: Locale,
@@ -283,12 +281,9 @@ async function handleTokenInput(
   }
 
   if (senderId !== host.hostUid) {
-    // Best-effort soft cap. Workers KV has no atomic ops and list is eventually consistent
-    // (up to ~60s lag), so rapid or concurrent /setup can overshoot this by one or two before
-    // the count converges. That is acceptable for the cap's purpose — keeping one owner from
-    // monopolising the shared KV write quota — and the host can always /uninvite an abuser. A
-    // hard, race-free guarantee would require a Durable Object counter, out of scope for this
-    // KV-only Worker.
+    // Soft cap, not an exact quota: KV has no atomic ops and list is eventually consistent, so
+    // concurrent /setup can overshoot by one or two before converging. Acceptable — the cap only
+    // stops one owner monopolising the shared write quota; an exact one needs a Durable Object.
     const owned = await listStoredByOwner(env.nfd, senderId);
     if (owned.length >= MAX_TENANTS_PER_UID) {
       await setState(env.nfd, senderId, { step: 'idle' });
@@ -317,7 +312,7 @@ async function handleTokenInput(
     botId,
   });
 
-  const target = `${baseUrl}/wh/${botId}`;
+  const target = `${host.publicBaseUrl}/wh/${botId}`;
   try {
     await tg.setWebhook(token, {
       url: target,
@@ -464,7 +459,6 @@ async function handleDisplaymode(
 async function handlePauseResume(
   env: Env,
   host: HostConfig,
-  baseUrl: string,
   senderId: string,
   args: string,
   pause: boolean,
@@ -489,7 +483,7 @@ async function handlePauseResume(
     return;
   }
 
-  const target = `${baseUrl}/wh/${r.botId}`;
+  const target = `${host.publicBaseUrl}/wh/${r.botId}`;
   try {
     await tg.setWebhook(token, {
       url: target,
@@ -766,7 +760,6 @@ async function handleInvites(
 async function handleHostMigrate(
   env: Env,
   host: HostConfig,
-  baseUrl: string,
   senderId: string,
   locale: Locale,
 ): Promise<void> {
@@ -776,11 +769,9 @@ async function handleHostMigrate(
   let webhooks = 0;
   let failures = 0;
   for (const { botId, cfg } of all) {
-    // Per-tenant isolation: unlike the per-update convention (non-TelegramError bubbles to
-    // the top-level handler), a host-triggered bulk migrate must not let one corrupt or
-    // unreachable tenant abort the whole batch. Any failure — encrypt, KV write, decrypt, or
-    // webhook — is logged (botId only) and counted, then the loop moves on. Idempotent, so a
-    // re-run retries the failures.
+    // Per-tenant isolation: one corrupt or unreachable tenant must not abort a host-triggered
+    // batch, unlike the per-update convention where a non-TelegramError bubbles to the top-level
+    // handler. Failures are logged (botId only) and counted; the batch is idempotent, so re-run.
     try {
       if (await encryptLegacySecrets(cfg, encKey)) {
         await putStored(env.nfd, botId, cfg);
@@ -789,7 +780,7 @@ async function handleHostMigrate(
       if (cfg.paused) continue;
       const token = await decryptToken(cfg, encKey);
       await tg.setWebhook(token, {
-        url: `${baseUrl}/wh/${botId}`,
+        url: `${host.publicBaseUrl}/wh/${botId}`,
         secret_token: await storedWebhookSecret(cfg, encKey),
         allowed_updates: ALLOWED_UPDATES,
       });

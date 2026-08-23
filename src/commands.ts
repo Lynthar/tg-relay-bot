@@ -53,10 +53,9 @@ function asReplyCmd(parsed: { cmd: string; args: string } | null): ReplyCmd | nu
 
 const USER_KEY_RE = /^[0-9a-f]{32}$/;
 
-// Escape hatch for guests whose forwarded messages have expired: a blocked guest
-// produces no new msg-map entries, so reply-based /unblock stops working after
-// MSG_MAP_TTL. The argument is the anonymous userKey (shown by /blocklist and in
-// the /block confirmation), never a raw UID.
+// Escape hatch for guests whose forwarded messages have expired: a blocked guest produces no new
+// msg-map entries, so reply-based /unblock stops working after MSG_MAP_TTL. The argument is the
+// anonymous userKey, never a raw UID — a UID here would put chatId into logs and command history.
 async function handleUnblockByKey(
   cfg: TenantCfg,
   skv: ScopedKV,

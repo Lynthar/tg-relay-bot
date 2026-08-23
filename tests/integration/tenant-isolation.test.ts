@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { env } from 'cloudflare:test';
-import { buildUpdate, flush, postWebhook, provisionTenant, tgMock } from '../helpers';
+import { buildUpdate, env, flush, postWebhook, provisionTenant, tgMock } from '../helpers';
 import { userKey } from '../../src/security';
 import { ScopedKV, getMsgMap, putMsgMap } from '../../src/storage';
 import { deleteTenant, getStored, putStored } from '../../src/tenant';

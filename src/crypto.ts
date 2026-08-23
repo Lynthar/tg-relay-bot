@@ -35,8 +35,8 @@ export async function encrypt(plaintext: string, key: CryptoKey): Promise<string
 
 export async function decrypt(b64: string, key: CryptoKey): Promise<string> {
   const all = base64ToBytes(b64);
-  const iv = all.subarray(0, 12);
-  const ct = all.subarray(12);
+  const iv = all.subarray(0, 12) as Uint8Array<ArrayBuffer>;
+  const ct = all.subarray(12) as Uint8Array<ArrayBuffer>;
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
   return dec.decode(pt);
 }
@@ -46,14 +46,14 @@ export function randomHex(byteLen: number): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(a.length + b.length);
   out.set(a, 0);
   out.set(b, a.length);
   return out;
 }
 
-function base64ToBytes(b64: string): Uint8Array {
+function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
