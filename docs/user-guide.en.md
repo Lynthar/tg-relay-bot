@@ -1,0 +1,425 @@
+# Usage and Deployment Guide
+
+[← Back to README](../README.en.md) · [中文版](user-guide.md)
+
+The README covers what this project is. This document is the full reference: how to use it, how to deploy it, how to operate it, and what to check when something breaks.
+
+## Table of contents
+
+- [Friend perspective: how to use](#friend-perspective-how-to-use)
+- [Host perspective: how to deploy](#host-perspective-how-to-deploy)
+- [Manager bot command reference](#manager-bot-command-reference)
+- [Tenant bot behavior](#tenant-bot-behavior)
+- [Display modes](#display-modes)
+- [Operations](#operations)
+- [Privacy & security model](#privacy--security-model)
+- [Data retention](#data-retention)
+- [FAQ](#faq)
+- [Development](#development)
+
+---
+
+## Friend perspective: how to use
+
+No Cloudflare or code required. Prerequisite: your host has shared their manager bot's username with you (e.g. `@YourHostRelayManagerBot`).
+
+### First-time onboarding
+
+1. Open the manager bot your host gave you, send `/whoami`, share the returned UID with your host, and wait until they run `/invite <your UID>`
+2. Open [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts to pick a name and username, copy the returned token (looks like `12345:ABC...`)
+3. Back in the manager bot, send `/setup`, then paste the token from step 2
+4. You should see `✅ @your_bot is live`. Done.
+5. **Important**: long-press the message containing your token → "Delete for me and bot" to wipe it from chat history
+
+Each user can onboard up to 3 bots (the host is exempt).
+
+### Day-to-day use
+
+- Anyone who messages `@your_bot` → you receive a **native Telegram forwarded message** in your chat with the bot (blue "Forwarded from <name>" header, sender's profile clickable)
+- Reply directly to that forwarded message → the reply goes back to the original sender (sender sees the bot, not you)
+- Your reply is sent via copyMessage, **never revealing your real identity**
+
+### Block / unblock
+
+In the chat with **your own bot** (not the manager bot):
+
+| Action | Effect |
+|---|---|
+| Reply to a forwarded message with any text | Text is sent back to the original guest |
+| Reply to a forwarded message with `/block` | Block that guest |
+| Reply to a forwarded message with `/unblock` | Unblock |
+| Reply to a forwarded message with `/checkblock` | Show whether blocked |
+| Send `/blocklist` | List blocked guests' userKeys |
+| Send `/unblock <userKey>` | Unblock by userKey (no reply needed) |
+| Send `/status` | Show that bot's stats (msg-map / blocked / rate-limit counts) |
+
+⚠️ `/block` **must be a reply to a forwarded message**. Naked UID arguments are not accepted, to prevent fat-finger blocks. Unblocking has one escape hatch: a blocked guest produces no new forwards and old ones expire after 30 days, so use `/unblock <userKey>` (the anonymous hash from `/blocklist`), never a UID.
+
+### Manage your bots
+
+In the manager bot:
+
+| Command | Purpose |
+|---|---|
+| `/list` | List bots you own |
+| `/info <bot_username>` | Show details for a bot |
+| `/displaymode <bot_username> <native\|tag\|hex>` | Change display mode (see below) |
+| `/admins <bot_username> [add\|remove <uid> \| list]` | Manage admin UIDs (owner cannot be removed) |
+| `/start_message <bot_username> <text>` | Customize the /start message (multi-line; up to 1000 chars) |
+| `/pause <bot_username>` | Pause (unregister webhook; messages sent meanwhile queue on Telegram's side, kept up to 24h) |
+| `/resume <bot_username>` | Resume (re-register webhook; queued messages from the pause are delivered) |
+| `/delete <bot_username> --yes` | Delete (unregister webhook + purge all KV) |
+
+Without `--yes`, `/delete` only prints a confirmation prompt.
+
+---
+
+---
+
+## Host perspective: how to deploy
+
+### Prerequisites
+
+1. **Cloudflare account** — sign up at [dash.cloudflare.com](https://dash.cloudflare.com) (free)
+2. **Node.js** — install LTS from [nodejs.org](https://nodejs.org)
+3. **A manager bot** — `/newbot` with [@BotFather](https://t.me/BotFather); recommend a `Manager` suffix to distinguish it from tenant bots; save the token
+4. **Your own Telegram UID** — message [@userinfobot](https://t.me/userinfobot), note the digits after `Id:`
+
+### Deploy
+
+```bash
+# 1. Clone & install
+git clone <this repo>
+cd tg-relay-bot
+npm install
+
+# 2. Log in to Cloudflare
+npx wrangler login
+
+# 3. Create the KV namespace
+npx wrangler kv namespace create nfd
+# Paste the returned id into wrangler.toml at id = "..."
+# ⚠️ The id currently in the file belongs to a previous host; if you don't replace it,
+# deploy fails with "KV namespace not found" (or, within the same Cloudflare
+# account, silently binds to the old data).
+
+# 4. Set the four required secrets
+npx wrangler secret put ENV_MANAGER_BOT_TOKEN   # the manager bot token from above
+npx wrangler secret put ENV_HOST_UID            # your Telegram UID
+npx wrangler secret put ENV_MASTER_ENC_KEY      # openssl rand -base64 32
+npx wrangler secret put ENV_ADMIN_SECRET        # openssl rand -hex 32
+
+# (optional) enable debug logging
+npx wrangler secret put ENV_DEBUG               # type "1"
+
+# 5. Deploy
+npx wrangler deploy
+# Outputs e.g. https://tg-relay-bot.<your-subdomain>.workers.dev
+
+# 6. Register the manager bot's webhook
+curl 'https://tg-relay-bot.<your-subdomain>.workers.dev/admin/registerWebhook?s=<ENV_ADMIN_SECRET>'
+# Should return: manager webhook registered at https://.../wh/<managerBotId>
+
+# 7. Open your manager bot in Telegram, send /start, expect a welcome message
+```
+
+### Deployment troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `wrangler deploy` errors with `KV namespace not found` | The id in `wrangler.toml` wasn't replaced (or replaced wrong) |
+| `/admin/registerWebhook` returns `Not found` | `ENV_ADMIN_SECRET` not set, URL mistyped, or secret contains chars that need URL-encoding |
+| `/admin/registerWebhook` returns 502 with `telegram error` | `ENV_MANAGER_BOT_TOKEN` wrong or revoked |
+| Manager bot ignores `/start` | Webhook never registered (re-run step 6); check `npx wrangler tail` |
+| `/setup` reports `setWebhook 失败` | Worker URL not HTTPS, DNS not yet propagated, or transient network — retry after ~30s |
+| After deploy, Telegram replays old messages | `update_id` dedup TTL is 5 min; replays settle on their own |
+
+### Secret meaning & rotation policy
+
+| Secret | Purpose | When to rotate |
+|---|---|---|
+| `ENV_MANAGER_BOT_TOKEN` | Manager bot's identity | When manager bot is reset; redo step 6 after |
+| `ENV_HOST_UID` | Your (host's) Telegram UID | When you change Telegram accounts |
+| `ENV_MASTER_ENC_KEY` | AES key for all tenant tokens at rest | **Never** — rotation makes every tenant unrecoverable |
+| `ENV_ADMIN_SECRET` | Auth for `/admin/*` endpoints | Whenever you suspect a leak |
+| `ENV_DEBUG` | Toggle debug logging | Off by default |
+
+> ⚠️ `ENV_MASTER_ENC_KEY` is the most sensitive secret in the system. Losing or changing it = all tenant tokens irrecoverable = every tenant must re-`/setup`. Keep an offline backup of the value.
+
+### Onboard yourself as the first friend
+
+After deploying, the host also goes through the friend flow to get the first outward-facing bot:
+
+1. Use BotFather to create a separate outward-facing relay bot (**not the manager bot**)
+2. In the manager bot, send `/setup`, paste the new bot's token (the host needs no invite and is exempt from the tenant cap)
+3. Done
+
+---
+
+---
+
+## Manager bot command reference
+
+Available to both friends and host:
+
+| Command | Purpose |
+|---|---|
+| `/start` | Welcome message |
+| `/help` | Command list (host sees additional host-only commands) |
+| `/whoami` | Show your Telegram UID |
+| `/cancel` | Reset current conversation state (cancel `/setup`) |
+| `/setup` | Multi-step: paste token → auto-validate → auto-register webhook (requires a host `/invite`; up to 3 bots per user) |
+| `/list` | List bots you own |
+| `/info <bot_username>` | Show details for a bot |
+| `/displaymode <bot_username> <native\|tag\|hex>` | Change display mode |
+| `/admins <bot_username> [add\|remove <uid> \| list]` | Manage admin UIDs; defaults to `list`; the owner cannot be removed; max 10 admins per bot |
+| `/start_message <bot_username> <text>` | Customize the /start message (multi-line allowed, up to 1000 chars) |
+| `/pause <bot_username>` | Pause a bot (guest messages sent while paused queue on Telegram's side for up to 24h) |
+| `/resume <bot_username>` | Resume a bot (queued messages from the pause are then delivered) |
+| `/delete <bot_username> [--yes]` | Delete bot; bare form prints a confirmation, with `--yes` actually deletes |
+
+Host only:
+
+| Command | Purpose |
+|---|---|
+| `/host_migrate` | Run once after upgrading from an older version: encrypts legacy plaintext secrets and refreshes webhooks; idempotent |
+| `/invite <uid>` | Allow a user to `/setup` (they can find their UID via `/whoami`) |
+| `/uninvite <uid>` | Revoke an invite (existing bots unaffected; use `/host_purge` if needed) |
+| `/invites` | List invited users |
+| `/host_list` | List **all** tenants (including other friends') |
+| `/host_disable <bot_username>` | Forcibly pause any tenant (no ownership required) |
+| `/host_purge <bot_username> --yes` | Forcibly delete any tenant; bare form only prints confirmation |
+
+---
+
+---
+
+## Tenant bot behavior
+
+Each onboarded bot supports the following inside its own private chat.
+
+For everyone:
+
+| Command | Purpose |
+|---|---|
+| `/start` | Show welcome message (default is bilingual; the owner can customize it via `/start_message` in the manager bot) |
+| `/help` | Show usage |
+| `/whoami` | Show the sender's UID |
+
+For admins only (the owner plus anyone they added via `/admins`):
+
+| Action | Effect |
+|---|---|
+| Reply to a forwarded message with any text | Text is sent back to the original guest |
+| Reply with `/block` | Block that guest |
+| Reply with `/unblock` | Unblock |
+| Reply with `/checkblock` | Show block status |
+| Send `/blocklist` | List blocked guests' userKeys |
+| Send `/unblock <userKey>` | Unblock by userKey (for when the original forward has expired) |
+| Send `/status` | Show stats (msg-map / blocked / rate-limit windows counts) |
+
+Non-admin users sending `/block` etc. → not effective; the message is treated as a normal forward to admin. Admin-sent text starting with `/` that is not one of the commands above (e.g. a typo like `/blck`) is intercepted with a notice and never sent to the guest.
+
+Note: the webhook only subscribes to new messages (`message`); a guest's **edits to already-sent messages are not synced** to admins.
+
+---
+
+---
+
+## Display modes
+
+Each tenant bot configures this independently; default is `native`. Change via `/displaymode <bot_username> <mode>` in the manager bot.
+
+| Mode | What admin sees | Suits |
+|---|---|---|
+| `native` | Native Telegram forward UI ("Forwarded from <name>" header, profile clickable) | Most cases; most direct |
+| `tag` | Rich HTML tag (`↘ <name> · @handle · id:xxx`, with tg://user clickable link) + copyMessage (no forward metadata) | When you want sender identity but don't want the bot to look like it's "forwarding" |
+| `hex` | Opaque hash tag (`↘ a3f9c1b8...`) + copyMessage | Maximum privacy; even admin only sees an anonymous hash |
+
+---
+
+---
+
+## Operations
+
+### Live logs
+
+```bash
+npx wrangler tail
+```
+
+Default: only error output. Set `ENV_DEBUG=1` to see structured event flow (still no message content).
+
+### Inspect KV
+
+```bash
+# Top-level overview. Note --remote: Wrangler v4 targets local simulated data by default
+npx wrangler kv key list --binding=nfd --remote
+
+# All keys for one tenant
+npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote
+```
+
+### Force-purge a tenant (bypass manager bot)
+
+Normally use `/delete <bot_username> --yes`. If the manager bot is down (requires `jq`; both commands need `--remote`, or you'd be deleting local simulated data):
+
+```bash
+for key in $(npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote | jq -r '.[].name'); do
+  npx wrangler kv key delete --binding=nfd "$key" --remote
+done
+```
+
+### Upgrade
+
+```bash
+git pull
+npm install
+npx wrangler deploy
+```
+
+No need to re-register webhooks, re-put secrets, or migrate KV.
+
+When upgrading from a version that predates `/host_migrate`, do two things after deploying (both idempotent):
+
+1. Re-run `curl 'https://.../admin/registerWebhook?s=<ENV_ADMIN_SECRET>'` — applies `allowed_updates` to the manager bot's webhook
+2. Run `/host_migrate` in the manager bot — encrypts existing tenants' plaintext secrets and refreshes their webhooks
+
+### Full uninstall
+
+```bash
+# 1. In Telegram, /mybots in BotFather → delete every bot you created (manager + tenant)
+# 2. Delete the Worker
+npx wrangler delete
+# 3. Delete the KV namespace
+npx wrangler kv namespace delete --binding=nfd
+```
+
+### Rebuild (tear down and redeploy)
+
+= **full uninstall + the deploy steps again**. If you want to keep some bots, only unbind their webhook instead of deleting the bot in BotFather:
+
+```bash
+# 1a. Unbind webhook for each bot you want to keep (does NOT delete the bot)
+curl "https://api.telegram.org/bot<old bot token>/deleteWebhook"
+
+# 1b. For bots you no longer want, go to BotFather → /mybots → Delete Bot
+
+# 2. Delete the Worker and KV namespace
+npx wrangler delete
+npx wrangler kv namespace delete --binding=nfd
+
+# 3. Follow the "Deploy" steps from the top
+```
+
+Caveats:
+
+1. **The new `ENV_MASTER_ENC_KEY` cannot match the old one** — every old tenant's encrypted token is now garbage; every friend has to `/setup` again
+2. The new KV namespace id is different — **remember to update `wrangler.toml`**
+3. If the Worker name is unchanged, the URL usually stays the same (same subdomain); friends still talk to the same manager bot and won't notice
+
+Just want to rotate one secret without touching Worker / KV? Run `npx wrangler secret put <NAME>` to overwrite. Note: rotating `ENV_MASTER_ENC_KEY` makes **all existing tenant tokens undecryptable**.
+
+Just want to take everything offline temporarily (no data loss)? `/pause` each tenant from the manager bot; `/resume` brings it back. Note that guest messages sent while paused queue on Telegram's side (up to 24 hours) and are delivered to admins after `/resume`; anything older is dropped by Telegram.
+
+---
+
+---
+
+## Privacy & security model
+
+### What we guarantee
+
+- Guest chatIds are stored in KV as HMAC-SHA256 hashes (`userKey`); a KV dump reveals no chatId plaintext (the one exception is the reply-routing msg-map, which expires after 30 days)
+- Every tenant's token, webhook secret, and hashSecret are AES-GCM encrypted at rest in KV — a KV dump alone (without `ENV_MASTER_ENC_KEY`) cannot brute-force userKeys offline (deployments upgraded from older versions must run `/host_migrate` once)
+- Webhook auth relies on a per-tenant random `secret_token` header (constant-time compared, thwarting side channels), not path secrecy — the botId in the path is public information; a missing or wrong secret gets a uniform 404, unusable for probing whether a bot is hosted here
+- Telegram's webhook retries are deduplicated by `update_id`
+- Per-guest rate limit: max 5 messages per 60s; excess silently dropped
+- All admin endpoints require `ENV_ADMIN_SECRET`; invalid → 404
+- Bot ignores group chats and all update types other than `message` by default
+- Admin commands require replying to a forwarded message; naked UID operations are forbidden
+- Onboarding requires an explicit host `/invite` plus a per-user bot cap — strangers who discover the manager bot cannot attach bots to your deployment
+
+### What we cannot do
+
+| Who | Sees content | Why |
+|---|---|---|
+| Telegram (the company) | ✅ | Telegram is **not** end-to-end encrypted; bot protocol can't use Secret Chats |
+| Cloudflare | ✅ technically possible | The Worker runs on their edge; TLS terminates at CF |
+| Host (the deployer) | ✅ | `wrangler tail` for logs; KV holds all tenant tokens; inherent cost of multi-tenant hosting |
+| Anyone with a leaked bot token | ✅ | Token = full access; switching the webhook intercepts all messages |
+| ISPs / on-path observers | ❌ metadata only | TLS encrypted |
+| Other Telegram users | ❌ | Private chats are 1-to-1 |
+
+### Trust model
+
+- **Host and friend must mutually trust each other** — host can decrypt every tenant's token
+- **Don't host your bot on an untrusted host**
+- Trust in Telegram and Cloudflare are background assumptions of this architecture
+
+---
+
+---
+
+## Data retention
+
+| Data | Retention |
+|---|---|
+| `tenant:{botId}:cfg` (encrypted token & secrets) | Until `/delete --yes` |
+| `tenant:{botId}:msg-map-{adminUid}-{id}` | TTL 30 days |
+| `tenant:{botId}:block-{userKey}` | Until `/unblock` |
+| `tenant:{botId}:rate-{userKey}` | TTL 60 seconds |
+| `tenant:{botId}:update-{id}` | TTL 5 minutes |
+| `tenant:{botId}:mg-*` / `album-*` (album tag & rate-unit dedup markers) | TTL 60 seconds |
+| `manager:user-state-{uid}` | TTL 1 hour after inactivity |
+| `manager:dedup-update-{id}` | TTL 5 minutes |
+| `manager:allow-{uid}` (invite list) | Until `/uninvite` |
+
+---
+
+---
+
+## FAQ
+
+**Q: What if I change `ENV_MASTER_ENC_KEY`?**
+A: All tenants become irrecoverable — this key encrypts every token. **Never rotate it.** If it does happen (key lost or mistakenly replaced), the recovery path: `/delete <bot> --yes` (or host `/host_purge`) each tenant — the local purge still runs even when the token can no longer be decrypted; only the old webhook can't be deregistered on the tenant's behalf — then re-`/setup`; the new setWebhook simply overwrites the old webhook.
+
+**Q: Why does the webhook URL sometimes return 404?**
+A: Three possibilities: (a) wrong path; (b) missing/wrong `X-Telegram-Bot-Api-Secret-Token` header; (c) tenant deleted. A `/pause`d tenant does NOT 404 — it returns 200 and drops the update (normally pause has unregistered the webhook, so Telegram stops delivering at all).
+
+**Q: Manager bot doesn't respond.**
+A: Check `npx wrangler tail`; re-register via `/admin/registerWebhook?s=...`; verify `ENV_MANAGER_BOT_TOKEN` is correct.
+
+**Q: A friend's tenant bot isn't receiving messages.**
+A: In the manager bot, `/info <their_bot>` → check `status`; if paused, `/resume`; or have the friend re-`/setup`.
+
+**Q: Can friends see each other's bot data?**
+A: Other friends cannot — tenants are isolated by KV prefix (`tenant:{botId}:`), and a regular user's `/info /pause /...` only reach bots they own. The **host, however, is the super-admin**: besides the `/host_*` commands, the host's regular management commands also work on any tenant (the host already holds the master key and the Cloudflare account, so this concedes no extra trust). Message contents are visible to no one — they are not persisted.
+
+**Q: Is Cloudflare's free tier enough?**
+A: For small scale, yes. Workers free: 100k requests/day; KV free: **1k writes/day (shared platform-wide, resets 00:00 UTC)**. Each delivered guest message costs ~3 KV writes (blocked / rate-limited / junk messages cost none). Beware: **once the daily free quota is exhausted, further KV writes fail outright** — messages are silently lost, not "slightly over budget". 10 friends × 50 messages/day ≈ 1500 writes clearly exceeds it — at that scale use Workers Paid ($5/month, 1M writes/month).
+
+**Q: How do I run it locally?**
+A: Create `.dev.vars` (gitignored) mirroring all four required secrets, then `npx wrangler dev`.
+
+**Q: Why does a guest who sends 6+ messages within 60 seconds only see the first 5 reach the admin?**
+A: Rate limiting. Per-guest cap is 5 per 60s; excess is silently dropped (no feedback to attackers). A media group (album) counts as a single unit, so a 2–10 item album arrives whole.
+
+---
+
+---
+
+## Development
+
+```bash
+npm install           # install dependencies
+npm run typecheck     # tsc type check
+npm test              # run the test suite (vitest + @cloudflare/vitest-pool-workers, fully offline)
+npm run test:watch    # tests in watch mode
+npm run dev           # local wrangler dev
+npm run deploy        # deploy to Cloudflare
+```
+
+Tests live under `tests/unit/` (pure functions) and `tests/integration/` (webhook, tenant isolation, manager commands).
+
+---
