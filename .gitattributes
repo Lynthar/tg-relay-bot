@@ -1,0 +1,4 @@
+# Every file here must arrive LF. A CR in the Dockerfile or in anything the
+# image shells out to fails the build on the Linux targets this deploys to,
+# and turns any Windows checkout into a whole-file diff.
+* text=auto eol=lf
