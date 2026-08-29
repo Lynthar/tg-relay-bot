@@ -1,139 +1,143 @@
-# Relay Bot
+# tg-relay-bot
 
-**中文** | [English](README.en.md)
+[![license](https://img.shields.io/github/license/Lynthar/tg-relay-bot)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Lynthar/tg-relay-bot/ci.yml?branch=main&label=CI)](https://github.com/Lynthar/tg-relay-bot/actions/workflows/ci.yml)
 
-一个 Telegram **双向消息中继 bot 平台**，同一套代码支持两种部署形态：**Cloudflare Worker**（免费档、零运维）或 **Docker 容器**（自有服务器、数据在自己手里）。一份部署可以同时托管你自己 + 朋友们的多个 bot；朋友通过 Telegram 自助 onboard，全程不需要碰服务器、Cloudflare 或代码。
+注重隐私的多租户 Telegram 消息中继 bot：一套代码，可部署为 Cloudflare Worker 或 Docker 容器
 
-> Fork 自 [LloydAsp/nfd](https://github.com/LloydAsp/nfd)，重写为多租户架构，强化隐私与安全模型。
+简体中文 | [English](README.en.md)
 
----
+陌生人给你的 bot 发私聊，消息转到你自己的 Telegram 里；你直接回复那条转发，对方就收到
+了——发信人显示成 bot，你的账号自始至终没露出去。
 
-## 它是什么
-
-一句话：让任何人能给你的 bot 发消息找到你，但 **对方不知道你是谁，也找不到你的真实账号**。
-
-详细：
-
-- 别人给你的 bot 发消息 → 你（运营者）在自己的 Telegram 里收到
-- 你直接 reply 那条消息 → 对方收到你的回复，发信人显示为 bot
-- 对方完全感知不到你这个真实账号
-
-**多租户**意味着：你（部署方）一次部署，可以同时为自己和你信任的朋友托管多个独立的 bot，每个 bot 数据完全隔离。
-
-## 核心特性
-
-- **轻量** — Cloudflare 轨：单 Worker + 单 KV namespace；Docker 轨：单容器 + 一个 SQLite 文件。都零外部服务依赖
-- **多租户** — 一次部署托管所有 bot；朋友在 Telegram 内自助 onboard（需 host 先 `/invite` 邀请）
-- **静态加密** — 所有 tenant 的 bot token、webhook secret、hashSecret 一律 AES-GCM 加密存储
-- **访客匿名化** — 访客 chatId 以 HMAC-SHA256 哈希形式存储；dump 存储也无法还原"是谁联系过谁"
-- **安全收紧** — 每个 webhook 请求强制校验每租户随机的 secret_token（constant-time 比较）、`update_id` 去重、限速、admin 命令必须 reply 转发消息
-- **成本低** — Cloudflare 免费档对个人/小团队够用；或者一台 1 vCPU / 512 MB 的 VPS 跑十几个 tenant bot
-
-## 适用与不适用场景
-
-| ✅ 适用 | ❌ 不适用 |
-|---|---|
-| 公开一个 bot 接受陌生人留言但不暴露自己 ID | 真正的端到端加密通讯（Telegram 本身做不到） |
-| 个人客服 / 私聊咨询入口 | 大规模商业客服（用 Crisp / Chatwoot / Intercom） |
-| 小团队共享一个对外联系点 | 工单 / 自动分配 / 人工坐席切换 |
-| 帮朋友们也托管同样的服务 | 不可信场景下的代托管（host 持有 token 解密能力） |
-
-## 三类角色
-
-| 角色 | 是谁 | 需要什么 |
-|---|---|---|
-| **Host** | 部署本仓库的人 | Cloudflare 账号 + Node.js，**或** 一台带 Docker 的服务器 + 一个公网 HTTPS 域名 |
-| **Friend** | 想拥有自己 bot 的人，由 host 邀请 | 仅需 Telegram |
-| **Guest** | 给某个 bot 发消息的任何人 | 仅需 Telegram |
-
-## 架构概览
-
-```
-                       ┌──────────────────────────────────┐
-                       │  同一个 Hono app（一份代码）      │
- Friend ──manager bot─→│   /wh/{managerBotId}              │── KV 存储 (manager:user-state-*)
-                       │     ↓ /setup 多轮对话             │
- Guest ──tenant bot──→ │   /wh/{tenantBotId}               │── KV 存储 (tenant:{botId}:*)
-                       │     ↓ relay 转发                  │      msg-map / block / rate / dedup
- Friend ←──────────── │     ↓ forwardMessage              │
-                       └──────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant V as 访客
+    participant B as 中继 bot
+    participant O as 你
+    V->>B: 私聊消息
+    B->>O: 转发；发信人只显示为一段 userKey
+    O->>B: 回复那条转发
+    B->>V: 以 bot 的身份送达
 ```
 
-- **管家 bot**（host 一次性建好）：朋友通过它 onboard 与管理自己的 bot
-- **Tenant bot**（朋友各自的）：实际承担"双向消息中继"工作
-- 二者共用同一个进程，URL 路径区分
+我在上游基础上改动最大的一处，是**让一次部署能托管很多个 bot**。你自己的，加上你邀请
+的朋友的，彼此完全隔离。朋友不用碰服务器，也不用找你要什么密钥：在一个「管家 bot」
+里发 `/setup`，把自己的 token 贴进去就可以了。
 
-两种部署形态只差入口与存储后端：
+## 安装
 
-- **Cloudflare 轨** — `src/worker.ts` 入口，Telegram 直连 Worker，存储是 Cloudflare KV
-- **Docker 轨** — `src/server.ts` 入口，反代做 TLS 终止后转发到容器的 8080 端口（Telegram webhook 强制 HTTPS），存储是 SQLite（`/data/db.sqlite`）
+两种部署方式都完整支持，CI 里两种都跑。共同的前置是找 [@BotFather](https://t.me/BotFather)
+建一个**管家 bot**（跟中继 bot 分开），以及知道自己的 Telegram UID。
 
----
-
----
-
-## 快速开始
-
-**如果你是 friend**（host 已经把管家 bot 的用户名给你了）：找那个管家 bot 发 `/whoami` 把 UID 报给 host，等他 `/invite` 你；然后去 [@BotFather](https://t.me/BotFather) 建一个自己的 bot，回来发 `/setup` 粘 token 即可。全程不碰服务器。
-
-**如果你是 host**，二选一：
-
-### Cloudflare 轨
+**Cloudflare Worker**——需要 Cloudflare 账号和 Node 20+：
 
 ```bash
-git clone <this repo> && cd tg-relay-bot && npm install
+git clone https://github.com/Lynthar/tg-relay-bot.git
+cd tg-relay-bot
+npm install
 npx wrangler login
-npx wrangler kv namespace create nfd      # 把返回的 id 填进 wrangler.toml
-# 在 wrangler.toml 加：[vars] ENV_PUBLIC_BASE_URL = "https://<你的 worker>.workers.dev"
+npx wrangler kv namespace create nfd
+```
+
+把返回的 id 填进 `wrangler.toml`（**仓库里那个现成的 id 是别人的，必须换掉**），
+在 `[vars]` 里设 `ENV_PUBLIC_BASE_URL`，然后：
+
+```bash
 npx wrangler secret put ENV_MANAGER_BOT_TOKEN
 npx wrangler secret put ENV_HOST_UID
-npx wrangler secret put ENV_MASTER_ENC_KEY   # openssl rand -base64 32
-npx wrangler secret put ENV_ADMIN_SECRET     # openssl rand -hex 32
+npx wrangler secret put ENV_MASTER_ENC_KEY
+npx wrangler secret put ENV_ADMIN_SECRET
 npx wrangler deploy
-curl 'https://<你的 worker>.workers.dev/admin/registerWebhook?s=<ENV_ADMIN_SECRET>'
 ```
 
-⚠️ `wrangler.toml` 里现有的 KV id 是上一任 host 的，**必须换成自己的**。
-
-### Docker 轨
-
-需要一台能跑 Docker 的机器和一个能签 HTTPS 证书的域名。
+**Docker**——需要一个能签 HTTPS 证书的域名（Telegram 的 webhook 只收 HTTPS）：
 
 ```bash
-git clone <this repo> && cd tg-relay-bot
-cp .env.example .env      # 填 5 个必填项（含 ENV_PUBLIC_BASE_URL）
-docker compose up -d      # 首次会编译 better-sqlite3，约 1-2 分钟
-# 配反代把域名 TLS 终止后转发到 127.0.0.1:8080
-curl "https://relay.example.com/admin/registerWebhook?s=<ENV_ADMIN_SECRET>"
+git clone https://github.com/Lynthar/tg-relay-bot.git
+cd tg-relay-bot
+cp .env.example .env
+docker compose up -d
 ```
 
-⚠️ 两轨通用：`ENV_MASTER_ENC_KEY` 一旦丢失或更换，所有租户 token 不可恢复——生成后另做一份离线备份。
+反代把 TLS 卸载后转到 `127.0.0.1:8080`。两种部署方式最后都要注册一次 webhook：
 
-逐步说明、反代示例、故障排查表、secret 轮换策略见[使用与部署指南](docs/user-guide.md#host-视角怎么部署)。
+```bash
+curl "https://<你的域名>/admin/registerWebhook?s=<ENV_ADMIN_SECRET>"
+```
+
+## 用法
+
+朋友要用起来，最短的流程是：找管家 bot 发 `/whoami` 拿到自己的 UID → 告诉你 → 你发
+`/invite <uid>` → 他去 BotFather 建 bot → 回管家 bot 发 `/setup` 贴 token → 完成。
+每个 UID 最多 3 个 bot，webhook 自动注册。
+
+管家 bot 里，所有人可用：`/start` `/help` `/whoami` `/setup` `/list` `/cancel`。
+
+bot 主人管自己的 bot：
+
+```
+/info <bot_username>
+/displaymode <bot_username> <native|tag|hex>
+/admins <bot_username> [add|remove <uid> | list]
+/start_message <bot_username> <文案>
+/pause <bot_username>   /resume <bot_username>
+/delete <bot_username> --yes
+```
+
+host 另有 `/invite` `/uninvite` `/invites` `/host_list` `/host_disable`
+`/host_purge` `/host_migrate`。
+
+在中继 bot 那边，`/block` `/unblock` `/checkblock` 必须**回复某条转发消息**才生效。
+相册、转发、各类媒体走同一套处理逻辑；访客限速默认 60 秒 5 条（相册整组算一条），
+update 去重，每 bot 最多 10 个管理员。
+
+## 配置
+
+Worker 侧用 `wrangler secret put` 加 `wrangler.toml` 的 `[vars]`；Docker 侧用 `.env`。
+逐租户的设置不在这里，存在 KV 或 SQLite 里。
+
+| 变量 | 说明 |
+|---|---|
+| `ENV_MANAGER_BOT_TOKEN` | 管家 bot 的 token，**跟中继 bot 是两个** |
+| `ENV_HOST_UID` | 你自己的 Telegram UID |
+| `ENV_MASTER_ENC_KEY` | base64 的 32 字节 AES 密钥。**定了就不能改**，改了所有租户 token 都解不开 |
+| `ENV_PUBLIC_BASE_URL` | 必填，必须 `https://` 开头，所有 webhook 地址由它拼出来 |
+| `ENV_ADMIN_SECRET` | 守 `/admin/*`；不设的话那些端点一律 404 |
+| `PORT` / `DATA_DIR` | 只有 Node 那种部署读，默认 8080 与 `/data` |
+
+生成密钥：`openssl rand -base64 32` 和 `openssl rand -hex 32`。
+
+## 安全与边界
+
+- **不是端到端加密**，Telegram 本身就做不到。host 手上有解开所有租户 token 的能力——
+  这套东西**不适合放在你不信任的人那里托管**。
+- **匿名保护的对象是访客，不是运营者。** 开 `ENV_DEBUG=1` 时事件日志会记 owner 和
+  管理员的 UID；访客永远只以 userKey 出现。
+- **`ENV_MASTER_ENC_KEY` 是唯一的根密钥，丢了无法恢复**：所有租户得重新 `/setup`，
+  没有第二道灾备。
+- **两种部署方式之间不能迁移数据。** 换一种等于每个人重新配置一次，黑名单会丢。
+- **只处理私聊消息。** 群组、频道、消息编辑、按钮回调一概不处理。
+- **没有命令菜单也没有按钮**，bot 用户名、UID、32 位 userKey 都要手动输入。
+
+存储侧：访客的 chatId 不落库，落的是每租户独立密钥算出来的 `HMAC-SHA256` 截断 16 字节；
+租户的 bot token 与 webhook secret 用 AES-256-GCM 静态加密；密钥比较走常数时间。
+174 个测试用例，主套件跑纯 Node，另有 5 个冒烟跑真 workerd。
+
+## 与上游的区别
+
+上游是 [LloydAsp/nfd](https://github.com/LloydAsp/nfd)——单租户、单文件 Worker，每个
+bot 的配置都在环境变量里，加一个 bot 就要改一次 Cloudflare 配置。我用 TypeScript 把它
+重写成多租户服务：配置搬进存储层，凭据静态加密，加了邀请制、限速、去重、SQLite 后端
+和 Docker 部署。我还删掉了上游的 UID 反诈名单——那是社区场景的需求，个人小规模自用
+时它只是一条对外网的运行时依赖。
 
 ## 文档
 
-**[使用与部署指南](docs/user-guide.md)** 是完整参考：
+- [用户指南](docs/user-guide.md) —— 部署、日常使用、常见问题。
+  [English](docs/user-guide.en.md) 同步维护。
 
-| 章节 | 讲什么 |
-|---|---|
-| [Friend 视角](docs/user-guide.md#friend-视角怎么使用) | 接入、日常收发、屏蔽、管理自己的 bot |
-| [Host 视角](docs/user-guide.md#host-视角怎么部署) | 两轨部署步骤、反代配置、故障排查、secret 含义与轮换 |
-| [命令清单](docs/user-guide.md#管家-bot-命令清单) · [Tenant 行为](docs/user-guide.md#tenant-bot-行为) · [显示模式](docs/user-guide.md#显示模式) | 全部命令与三种转发样式 |
-| [运维](docs/user-guide.md#运维) | 看日志、查存储、强制清租户、备份恢复、升级（含合并前旧版升级路径）、卸载、重建 |
-| [隐私与安全模型](docs/user-guide.md#隐私与安全模型) | 能做到什么、**做不到什么**、信任模型 |
-| [数据保留](docs/user-guide.md#数据保留) · [常见问题](docs/user-guide.md#常见问题) · [开发](docs/user-guide.md#开发) | 各键的 TTL、FAQ、本地开发与测试 |
+## 许可证
 
-English readers: [Usage and Deployment Guide](docs/user-guide.en.md).
-
----
-
-## 致谢
-
-- [LloydAsp/nfd](https://github.com/LloydAsp/nfd) — 单租户单文件版本，本仓库的起点
-- Cloudflare Workers + KV — 零运维形态的运行环境
-- Hono、@hono/node-server、better-sqlite3 — 让同一套代码也能跑在自己的服务器上
-
-## License
-
-继承自上游，详见 [LICENSE](LICENSE)。
+GNU 通用公共许可证 v3.0 —— 见 [LICENSE](LICENSE)。继承自上游
+[LloydAsp/nfd](https://github.com/LloydAsp/nfd)，同为 GPL-3.0。

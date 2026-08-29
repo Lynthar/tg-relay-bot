@@ -1,139 +1,163 @@
-# Relay Bot
+# tg-relay-bot
 
-[中文](README.md) | **English**
+[![license](https://img.shields.io/github/license/Lynthar/tg-relay-bot)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Lynthar/tg-relay-bot/ci.yml?branch=main&label=CI)](https://github.com/Lynthar/tg-relay-bot/actions/workflows/ci.yml)
 
-A privacy-focused Telegram **message relay bot platform**. One codebase, two deployment shapes: a **Cloudflare Worker** (free tier, zero ops) or a **Docker container** (your own server, your data in one SQLite file). One deployment hosts your own bot plus your friends' bots — friends onboard through Telegram with zero infrastructure to manage.
+Privacy-first, multi-tenant Telegram message relay bot — one codebase, two deploy targets: Cloudflare Worker or Docker
 
-> Forked from [LloydAsp/nfd](https://github.com/LloydAsp/nfd) and rewritten as a multi-tenant TypeScript service with a stronger privacy/security model.
+English | [简体中文](README.md)
 
----
+A stranger messages your bot; the message lands in your own Telegram. You reply
+to that forwarded message and they get an answer — from the bot. Your account
+never appears.
 
-## What it is
-
-In one sentence: let anyone reach you through your bot **without learning who you are or where to find you**.
-
-In detail:
-
-- Someone messages your bot → you (the operator) receive it in your own Telegram
-- You reply directly to that message → they receive your reply, sender shown as the bot
-- They have no way to discover the real account behind the bot
-
-**Multi-tenant** means: a single deployment can host both your own bots and your trusted friends' bots, each with fully isolated data.
-
-## Key features
-
-- **Lightweight** — Cloudflare track: single Worker + single KV namespace; Docker track: single container + one SQLite file. No external services either way
-- **Multi-tenant** — one deployment hosts every bot; friends self-onboard from inside Telegram (after a host `/invite`)
-- **Encryption at rest** — every tenant's bot token, webhook secret, and hashSecret are AES-GCM encrypted
-- **Anonymized senders** — guest chatIds are stored as HMAC-SHA256 hashes; even a full storage dump cannot reveal who messaged whom
-- **Hardened webhook surface** — every webhook request must carry a per-tenant random secret_token (constant-time compared), `update_id` deduplication, per-guest rate limiting, admin commands gated to reply context
-- **Cheap** — Cloudflare's free tier covers personal/small-team usage; or a 1 vCPU / 512 MB RAM VPS comfortably hosts a dozen tenant bots
-
-## When to use / when not to use
-
-| ✅ Use it for | ❌ Skip it for |
-|---|---|
-| Public-facing inbox bot without revealing your ID | Real end-to-end encryption (Telegram itself can't do this) |
-| Personal customer support / inquiry channel | Large-scale commercial support (use Crisp / Chatwoot / Intercom) |
-| Small team's shared external contact point | Ticketing / agent assignment / handoff |
-| Hosting bots for friends without per-user infra | Untrusted hosting (host holds token decryption capability) |
-
-## The three roles
-
-| Role | Who | Needs |
-|---|---|---|
-| **Host** | The person who deploys this repo | Cloudflare account + Node.js, **or** a server with Docker + a public HTTPS domain |
-| **Friend** | Someone who wants their own bot, invited by host | Just Telegram |
-| **Guest** | Anyone messaging some bot | Just Telegram |
-
-## Architecture
-
-```
-                       ┌──────────────────────────────────┐
-                       │  One Hono app (one codebase)     │
- Friend ──manager bot─→│   /wh/{managerBotId}              │── KV storage (manager:user-state-*)
-                       │     ↓ /setup conversation         │
- Guest ──tenant bot──→ │   /wh/{tenantBotId}               │── KV storage (tenant:{botId}:*)
-                       │     ↓ relay logic                 │      msg-map / block / rate / dedup
- Friend ←──────────── │     ↓ forwardMessage              │
-                       └──────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant V as Visitor
+    participant B as Relay bot
+    participant O as You
+    V->>B: private message
+    B->>O: forwarded; the sender shows only as a userKey
+    O->>B: reply to the forwarded message
+    B->>V: delivered as the bot
 ```
 
-- **Manager bot** (set up once by the host): friends use it to onboard and manage their own bots
-- **Tenant bots** (each friend's): the actual relays
-- Both share one process; URL paths distinguish them
+My biggest change from upstream is that **one deployment hosts many bots**.
+Yours, plus your friends', fully isolated from each other. Your friends never
+touch the server and never ask you for a key: they message a "manager bot", send
+`/setup`, and paste their own token.
 
-The two deployment shapes differ only in entry point and storage backend:
+## Install
 
-- **Cloudflare track** — `src/worker.ts` entry, Telegram reaches the Worker directly, storage is Cloudflare KV
-- **Docker track** — `src/server.ts` entry, a reverse proxy terminates TLS and forwards to the container's port 8080 (Telegram webhooks require HTTPS), storage is SQLite (`/data/db.sqlite`)
+Both deployment targets are fully supported, and CI exercises both. Either way
+you first need a **manager bot** from [@BotFather](https://t.me/BotFather) —
+separate from any relay bot — and your own Telegram UID.
 
----
-
----
-
-## Quick start
-
-**If you are a friend** (your host has given you the manager bot's username): send `/whoami` to that manager bot and pass the UID to your host so they can `/invite` you. Then create your own bot at [@BotFather](https://t.me/BotFather), come back and send `/setup` with the token. You never touch a server.
-
-**If you are the host**, pick one track:
-
-### Cloudflare track
+**Cloudflare Worker** — needs a Cloudflare account and Node 20+:
 
 ```bash
-git clone <this repo> && cd tg-relay-bot && npm install
+git clone https://github.com/Lynthar/tg-relay-bot.git
+cd tg-relay-bot
+npm install
 npx wrangler login
-npx wrangler kv namespace create nfd      # put the returned id into wrangler.toml
-# add to wrangler.toml:  [vars] ENV_PUBLIC_BASE_URL = "https://<your worker>.workers.dev"
+npx wrangler kv namespace create nfd
+```
+
+Put the returned id in `wrangler.toml` — **the one committed there belongs to
+someone else and must be replaced** — set `ENV_PUBLIC_BASE_URL` under `[vars]`,
+then:
+
+```bash
 npx wrangler secret put ENV_MANAGER_BOT_TOKEN
 npx wrangler secret put ENV_HOST_UID
-npx wrangler secret put ENV_MASTER_ENC_KEY   # openssl rand -base64 32
-npx wrangler secret put ENV_ADMIN_SECRET     # openssl rand -hex 32
+npx wrangler secret put ENV_MASTER_ENC_KEY
+npx wrangler secret put ENV_ADMIN_SECRET
 npx wrangler deploy
-curl 'https://<your worker>.workers.dev/admin/registerWebhook?s=<ENV_ADMIN_SECRET>'
 ```
 
-⚠️ The KV id currently in `wrangler.toml` belongs to a previous host — **replace it with your own**.
-
-### Docker track
-
-You need a machine that runs Docker and a domain you can get an HTTPS certificate for.
+**Docker** — needs a domain you can get an HTTPS certificate for, since Telegram
+only sends webhooks over HTTPS:
 
 ```bash
-git clone <this repo> && cd tg-relay-bot
-cp .env.example .env      # fill in the five required values (including ENV_PUBLIC_BASE_URL)
-docker compose up -d      # the first run compiles better-sqlite3, roughly 1-2 minutes
-# point a reverse proxy at 127.0.0.1:8080, terminating TLS for your domain
-curl "https://relay.example.com/admin/registerWebhook?s=<ENV_ADMIN_SECRET>"
+git clone https://github.com/Lynthar/tg-relay-bot.git
+cd tg-relay-bot
+cp .env.example .env
+docker compose up -d
 ```
 
-⚠️ Both tracks: if `ENV_MASTER_ENC_KEY` is ever lost or changed, every tenant token becomes unrecoverable. Keep an offline backup of the value you generate.
+Terminate TLS in your reverse proxy and forward to `127.0.0.1:8080`. Both
+deployment targets then need the webhook registered once:
 
-Step-by-step instructions, reverse-proxy examples, the troubleshooting tables, and secret rotation policy live in the [Usage and Deployment Guide](docs/user-guide.en.md#host-perspective-how-to-deploy).
+```bash
+curl "https://<your-domain>/admin/registerWebhook?s=<ENV_ADMIN_SECRET>"
+```
+
+## Usage
+
+The shortest sequence for a friend: message the manager bot with `/whoami` to get
+their UID, send it to you, you run `/invite <uid>`, they create a bot with
+BotFather, then `/setup` in the manager bot and paste the token. Up to three
+bots per UID, and the webhook registers itself.
+
+In the manager bot, anyone can use `/start`, `/help`, `/whoami`, `/setup`,
+`/list` and `/cancel`.
+
+Bot owners manage their own:
+
+```
+/info <bot_username>
+/displaymode <bot_username> <native|tag|hex>
+/admins <bot_username> [add|remove <uid> | list]
+/start_message <bot_username> <text>
+/pause <bot_username>   /resume <bot_username>
+/delete <bot_username> --yes
+```
+
+The host also has `/invite`, `/uninvite`, `/invites`, `/host_list`,
+`/host_disable`, `/host_purge` and `/host_migrate`.
+
+On a relay bot, `/block`, `/unblock` and `/checkblock` only work as a **reply to
+a forwarded message**. Albums, forwards and every media type take the same
+path; visitors are rate-limited to 5 messages per 60s by default (an album
+counting as one), updates are de-duplicated, and each bot can have up to 10
+admins.
+
+## Configuration
+
+On Worker, `wrangler secret put` plus `[vars]` in `wrangler.toml`. On Docker, an
+`.env` file. Per-tenant settings don't live here — they're in KV or SQLite.
+
+| Variable | Notes |
+|---|---|
+| `ENV_MANAGER_BOT_TOKEN` | The manager bot's token — **not** a relay bot's |
+| `ENV_HOST_UID` | Your own Telegram UID |
+| `ENV_MASTER_ENC_KEY` | base64 32-byte AES key. **Set it once and never change it** — changing it makes every tenant token undecryptable |
+| `ENV_PUBLIC_BASE_URL` | Required, must start with `https://`; every webhook URL is built from it |
+| `ENV_ADMIN_SECRET` | Guards `/admin/*`; without it those endpoints 404 unconditionally |
+| `PORT` / `DATA_DIR` | Node target only, default 8080 and `/data` |
+
+Generate keys with `openssl rand -base64 32` and `openssl rand -hex 32`.
+
+## Security and limits
+
+- **Not end-to-end encrypted** — Telegram can't do that, and neither can this.
+  The host can decrypt every tenant's token, so **don't run this somewhere you
+  don't trust**.
+- **Anonymity protects visitors, not operators.** With `ENV_DEBUG=1`, event logs
+  record owner and admin UIDs. Visitors only ever appear as a userKey.
+- **`ENV_MASTER_ENC_KEY` is the only root key, and losing it is unrecoverable.**
+  Every tenant has to `/setup` again; there's no second line of defence.
+- **Data can't be migrated between the two deployment targets.** Switching means
+  everyone reconfigures, and blocklists are lost.
+- **Private chats only.** Groups, channels, edited messages and callback queries
+  are not processed.
+- **No command menu and no buttons** — bot usernames, UIDs and 32-character
+  userKeys all have to be typed by hand.
+
+On the storage side: a visitor's chat ID is never stored, only a 16-byte
+truncated `HMAC-SHA256` under a per-tenant key; tenant bot tokens and webhook
+secrets are encrypted at rest with AES-256-GCM; secrets are compared in constant
+time. 174 test cases — the main suite on plain Node, plus five smoke tests
+against real workerd.
+
+## Differences from upstream
+
+Upstream is [LloydAsp/nfd](https://github.com/LloydAsp/nfd): a single-tenant,
+single-file Worker where each bot's configuration lives in environment
+variables, so adding a bot means editing Cloudflare config. I rewrote it in
+TypeScript as a multi-tenant service — configuration moved into storage,
+credentials encrypted at rest, plus invites, rate limiting, de-duplication, a
+SQLite backend and Docker deployment. I also dropped upstream's UID fraud list,
+which served a community use case and is otherwise a runtime dependency on the
+open internet.
 
 ## Documentation
 
-The **[Usage and Deployment Guide](docs/user-guide.en.md)** is the full reference:
-
-| Section | What it covers |
-|---|---|
-| [Friend perspective](docs/user-guide.en.md#friend-perspective-how-to-use) | Onboarding, day-to-day relay, blocking, managing your own bots |
-| [Host perspective](docs/user-guide.en.md#host-perspective-how-to-deploy) | Both deployment tracks, reverse-proxy config, troubleshooting, secret rotation |
-| [Commands](docs/user-guide.en.md#manager-bot-command-reference) · [Tenant behavior](docs/user-guide.en.md#tenant-bot-behavior) · [Display modes](docs/user-guide.en.md#display-modes) | Every command, and the three forwarding styles |
-| [Operations](docs/user-guide.en.md#operations) | Logs, storage inspection, force-purging a tenant, backup/restore, upgrades (including from pre-merge versions), teardown, rebuild |
-| [Privacy & security model](docs/user-guide.en.md#privacy--security-model) | What it does protect, what it **cannot**, and the trust model |
-| [Data retention](docs/user-guide.en.md#data-retention) · [FAQ](docs/user-guide.en.md#faq) · [Development](docs/user-guide.en.md#development) | TTL of every key, FAQ, local development and tests |
-
-Chinese readers: [中文指南](docs/user-guide.md).
-
----
-
-## Acknowledgments
-
-- [LloydAsp/nfd](https://github.com/LloydAsp/nfd) — the single-tenant single-file version this was forked from
-- Cloudflare Workers + KV — the zero-ops runtime shape
-- Hono, @hono/node-server, better-sqlite3 — what lets the same codebase run on your own server
+- [User guide](docs/user-guide.md) — deployment, day-to-day use, FAQ. Also in
+  [English](docs/user-guide.en.md).
 
 ## License
 
-Inherited from upstream — see [LICENSE](LICENSE).
+GNU General Public License v3.0 — see [LICENSE](LICENSE). Inherited from
+upstream [LloydAsp/nfd](https://github.com/LloydAsp/nfd), which is GPL-3.0 as
+well.
