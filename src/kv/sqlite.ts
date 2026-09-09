@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import type { KvStore, KvListResult } from '../storage';
+import { assertExpirationTtl, type KvStore, type KvListResult } from '../storage';
 
 const DEFAULT_LIST_LIMIT = 1000;
 const DEFAULT_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
@@ -105,6 +105,7 @@ export class SqliteKvStore implements KvStore {
     value: string,
     options?: { expirationTtl?: number },
   ): Promise<void> {
+    assertExpirationTtl(options?.expirationTtl);
     const expiresAt =
       options?.expirationTtl !== undefined
         ? Date.now() + options.expirationTtl * 1000

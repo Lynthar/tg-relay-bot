@@ -596,6 +596,29 @@ describe('/host_migrate', () => {
   });
 });
 
+describe('manager command parsing', () => {
+  it('/start with a deep-link payload shows the welcome message', async () => {
+    await sendManagerCmd(410001, '/start ref123', 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/Welcome to Relay-Bot Manager/);
+  });
+
+  it('a command is recognised regardless of case', async () => {
+    await sendManagerCmd(410002, '/Setup', 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/requires an invitation from the host/);
+  });
+
+  // The manager bot does not know its own username, so it cannot tell its own @suffix from
+  // another bot's; an addressed command is refused rather than guessed at, or a pasted
+  // "/delete@OtherBot x --yes" would execute here.
+  it('a command carrying an @suffix is refused, not executed', async () => {
+    await sendManagerCmd(410003, '/start@ManagerBot', 'en');
+    await flush();
+    expect(lastReplyText()).toMatch(/^Unknown command\. /);
+  });
+});
+
 describe('i18n: English locale', () => {
   it('/admins add emits English confirmation when language_code=en', async () => {
     const t = await provisionTenant({ botId: '400100', ownerUid: '400100' });

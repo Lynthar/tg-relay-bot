@@ -3,7 +3,7 @@
 # ─── Builder stage ───────────────────────────────────────────────────────────
 # Full Debian image so the native better-sqlite3 binding can fall back to
 # building from source if a prebuilt binary isn't available for the platform.
-FROM node:20-bookworm AS builder
+FROM node:24-bookworm AS builder
 WORKDIR /app
 
 RUN apt-get update \
@@ -18,7 +18,7 @@ RUN npm install --omit=dev
 
 
 # ─── Runner stage ────────────────────────────────────────────────────────────
-FROM node:20-bookworm-slim AS runner
+FROM node:24-bookworm-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production \

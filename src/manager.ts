@@ -7,7 +7,7 @@ import {
 } from './config';
 import { getEncKey } from './crypto';
 import * as tg from './telegram';
-import { TelegramError } from './telegram';
+import { TelegramError, parseBotCommand } from './telegram';
 import {
   getStored,
   putStored,
@@ -79,14 +79,19 @@ export async function handleManagerMessage(
 
   const state = await getState(env.nfd, senderId);
 
+  // The manager bot has no way to learn its own username, so parseBotCommand refuses every
+  // /cmd@Suffix instead of assuming it is ours: a command the user pasted for someone else's
+  // bot ("/delete@OtherBot x --yes") would otherwise execute here.
+  const parsed = parseBotCommand(text, undefined);
+
   // Awaiting-token state: intercept escape commands first, otherwise treat the input as the token.
   if (state.step === 'awaiting_token') {
-    if (text === '/cancel') {
+    if (parsed?.cmd === 'cancel') {
       await setState(env.nfd, senderId, { step: 'idle' });
       await reply(host, senderId, T.manager.onboardingCancelled[locale]());
       return;
     }
-    if (text === '/help') {
+    if (parsed?.cmd === 'help') {
       await reply(host, senderId, T.manager.helpText[locale](isHost));
       return;
     }
@@ -94,47 +99,37 @@ export async function handleManagerMessage(
     return;
   }
 
-  if (text === '/start') {
-    await reply(host, senderId, T.manager.welcome[locale]());
-    return;
-  }
-  if (text === '/help') {
-    await reply(host, senderId, T.manager.helpText[locale](isHost));
-    return;
-  }
-  if (text === '/whoami') {
-    await reply(host, senderId, T.manager.whoami[locale](senderId));
-    return;
-  }
-  if (text === '/cancel') {
-    await setState(env.nfd, senderId, { step: 'idle' });
-    await reply(host, senderId, T.manager.stateReset[locale]());
-    return;
-  }
-  if (text === '/setup') {
-    if (!isHost && !(await isInvited(env.nfd, senderId))) {
-      await reply(host, senderId, T.manager.setupNotInvited[locale]());
-      return;
-    }
-    await setState(env.nfd, senderId, { step: 'awaiting_token' });
-    await reply(host, senderId, T.manager.setupPrompt[locale]());
-    return;
-  }
-  if (text === '/list') {
-    await handleList(env, host, senderId, locale);
-    return;
-  }
-
-  // [\s\S] (not .) so args spanning newlines (e.g. multi-line /start_message) still match.
-  const m = text.match(/^\/(\w+)(?:\s+([\s\S]+))?$/);
-  if (!m) {
+  if (!parsed) {
     await reply(host, senderId, T.manager.unknownNoName[locale]());
     return;
   }
-  const cmd = m[1];
-  const args = (m[2] ?? '').trim();
+  const { cmd, args } = parsed;
 
   switch (cmd) {
+    case 'start':
+      await reply(host, senderId, T.manager.welcome[locale]());
+      return;
+    case 'help':
+      await reply(host, senderId, T.manager.helpText[locale](isHost));
+      return;
+    case 'whoami':
+      await reply(host, senderId, T.manager.whoami[locale](senderId));
+      return;
+    case 'cancel':
+      await setState(env.nfd, senderId, { step: 'idle' });
+      await reply(host, senderId, T.manager.stateReset[locale]());
+      return;
+    case 'setup':
+      if (!isHost && !(await isInvited(env.nfd, senderId))) {
+        await reply(host, senderId, T.manager.setupNotInvited[locale]());
+        return;
+      }
+      await setState(env.nfd, senderId, { step: 'awaiting_token' });
+      await reply(host, senderId, T.manager.setupPrompt[locale]());
+      return;
+    case 'list':
+      await handleList(env, host, senderId, locale);
+      return;
     case 'info':
       await handleInfo(env, host, senderId, args, isHost, locale);
       return;

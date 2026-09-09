@@ -1,7 +1,25 @@
+// Cloudflare KV refuses an expiration less than 60 seconds out, and it is one of the three
+// backends behind KvStore. The local two enforce the same floor, so a too-short window fails
+// on the track it was written on instead of only on Workers in production.
+export const MIN_EXPIRATION_TTL_SEC = 60;
+
+export function assertExpirationTtl(ttlSec: number | undefined): void {
+  if (ttlSec !== undefined && ttlSec < MIN_EXPIRATION_TTL_SEC) {
+    throw new RangeError(
+      `expirationTtl must be at least ${MIN_EXPIRATION_TTL_SEC}s, got ${ttlSec}`,
+    );
+  }
+}
+
 // Minimal KV contract — any backend satisfying this can drop in for env.nfd.
 export interface KvStore {
   get(key: string): Promise<string | null>;
   get<T = unknown>(key: string, options: { type: 'json' }): Promise<T | null>;
+  /**
+   * @param options.expirationTtl Seconds until the entry expires. Must be at least
+   *   {@link MIN_EXPIRATION_TTL_SEC} — every backend rejects a smaller value.
+   * @throws RangeError when `expirationTtl` is below that floor.
+   */
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
   delete(key: string): Promise<void>;
   list(options?: { prefix?: string; cursor?: string }): Promise<KvListResult>;

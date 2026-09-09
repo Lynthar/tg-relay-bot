@@ -59,16 +59,24 @@ export function getMe(token: string): Promise<TgMe> {
   return call<TgMe>(token, 'getMe', {});
 }
 
-// Parses a leading bot command: case-insensitive, tolerates trailing arguments ("/start ref123"),
-// validates an explicit @botname suffix. A suffix addressed to a DIFFERENT bot returns null so
-// callers treat the text as plain text — otherwise this bot would run another bot's commands.
+/**
+ * Parses a leading bot command: case-insensitive, tolerant of trailing arguments
+ * ("/start ref123"), and argument text spanning newlines is kept whole.
+ *
+ * @param botUsername This bot's own username, or `undefined` when the caller cannot know it.
+ *   An explicit `@suffix` naming a different bot — or any `@suffix` at all when the username
+ *   is `undefined` — yields `null`, so the caller treats the text as plain text. Guessing
+ *   instead would run commands the user pasted for someone else's bot.
+ * @returns The lowercased command name and its trimmed arguments, or `null` when the text is
+ *   not a command addressed to this bot.
+ */
 export function parseBotCommand(
   text: string,
-  botUsername: string,
+  botUsername: string | undefined,
 ): { cmd: string; args: string } | null {
   const m = text.match(/^\/([A-Za-z0-9_]+)(?:@(\w+))?(?:\s+([\s\S]*))?$/);
   if (!m) return null;
-  if (m[2] && m[2].toLowerCase() !== botUsername.toLowerCase()) return null;
+  if (m[2] && m[2].toLowerCase() !== botUsername?.toLowerCase()) return null;
   return { cmd: m[1].toLowerCase(), args: (m[3] ?? '').trim() };
 }
 
