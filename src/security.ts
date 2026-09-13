@@ -27,6 +27,12 @@ export async function userKey(chatId: number | string, hashSecret: string): Prom
     .join('');
 }
 
+// Same construction as userKey, applied to an owner/admin UID: storage keys and debug logs
+// carry this instead of the UID, so a dump cannot map a bot to the person running it.
+export function operatorKey(uid: number | string, hashSecret: string): Promise<string> {
+  return userKey(uid, hashSecret);
+}
+
 export function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let r = 0;

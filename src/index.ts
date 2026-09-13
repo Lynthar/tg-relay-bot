@@ -149,7 +149,7 @@ async function processManagerUpdate(
     // rare duplicate delivery merely repeats a reply — cheaper than letting
     // uninvited spam consume the platform-wide daily KV write quota.
     const senderId = String(update.message.chat.id);
-    if (senderId === host.hostUid || (await isInvited(env.nfd, senderId))) {
+    if (senderId === host.hostUid || (await isInvited(env.nfd, host, senderId))) {
       await markUpdateSeen(skv, update.update_id, DEDUP_TTL_SEC);
     }
     await handleManagerMessage(env, host, update.message);

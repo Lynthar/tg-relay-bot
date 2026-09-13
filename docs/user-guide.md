@@ -39,7 +39,8 @@ README 只讲这个项目是什么。这份文档是完整参考：怎么用、�
 
 - 任何人给 `@你的bot` 发消息 → 你 Telegram 里收到一条**原生 forward 消息**（顶部蓝色 "Forwarded from <访客名字>"，可点开访客 profile）
 - 你直接 reply 那条消息 → 对方收到（发信人是 bot，看不到你）
-- 你回复的内容也以 copyMessage 形式发出，**不会暴露你的真实身份**
+- 你回复的内容以 copyMessage 形式发出，不带转发头和发信人
+- 名片、位置、地点、作为文件发送的内容和音频文件会照常送达，但 bot 会回你一条提醒——这类内容会交出联系方式、位置，或带着文件元数据（EXIF、作者字段、ID3）。回复那条提醒发 `/recall`，48 小时内可以从对方那里删掉
 
 ### 屏蔽 / 解屏
 
@@ -51,6 +52,7 @@ README 只讲这个项目是什么。这份文档是完整参考：怎么用、�
 | reply 一条转发消息发 `/block` | 屏蔽该访客 |
 | reply 一条转发消息发 `/unblock` | 解除屏蔽 |
 | reply 一条转发消息发 `/checkblock` | 查询是否屏蔽 |
+| reply 一条「已送达」提醒发 `/recall` | 从访客那里删掉那条回复（48 小时内） |
 | 发 `/blocklist` | 列出所有被屏蔽访客的 userKey |
 | 发 `/unblock <userKey>` | 按 userKey 解除屏蔽（无需 reply） |
 | 发 `/status` | 看该 bot 的运行状态（msg-map 数 / 黑名单数等） |
@@ -254,7 +256,7 @@ Docker 轨故障排查：
 
 | 命令 | 说明 |
 |---|---|
-| `/host_migrate` | 从旧版本升级后运行一次：加密存量租户的明文 secrets 并刷新 webhook；可重复运行 |
+| `/host_migrate` | 从旧版本升级后运行一次：加密存量租户的明文 secrets 与运营者 UID、把邀请列表改成哈希键、刷新 webhook；可重复运行 |
 | `/invite <uid>` | 邀请某用户使用 `/setup`（对方可发 `/whoami` 查 UID） |
 | `/uninvite <uid>` | 取消邀请（不影响其已 onboard 的 bot，需要时用 `/host_purge`） |
 | `/invites` | 查看邀请列表 |
@@ -286,9 +288,12 @@ Docker 轨故障排查：
 | reply 一条转发消息发 `/block` | 拉黑该访客 |
 | reply 一条转发消息发 `/unblock` | 解黑 |
 | reply 一条转发消息发 `/checkblock` | 查询是否被屏蔽 |
+| reply 一条「已送达」提醒发 `/recall` | 从访客那里删掉对应的回复；Telegram 只允许 bot 删自己 48 小时内发出的消息 |
 | 发 `/blocklist` | 列出被屏蔽访客的 userKey |
 | 发 `/unblock <userKey>` | 按 userKey 解除屏蔽（应对原转发消息已过期的情况） |
 | 发 `/status` | 显示运行状态（msg-map / block / rate-limit windows 计数） |
+
+管理员回复里的名片、位置、地点、文件（document）与音频文件（audio）照常送达，送达后 bot 回一条提醒说明它会暴露什么，并给出 `/recall`。照片、视频、语音、贴纸不提醒——Telegram 会重编码它们，不携带原始元数据。
 
 非 admin 用户发 `/block` 等命令 → 命令不生效（被当作普通消息转发给 admin）。管理员发送的以 `/` 开头但不是上述命令的文本（如拼错的 `/blck`）会被拦截并提示，不会发送给访客。
 
@@ -306,7 +311,7 @@ Docker 轨故障排查：
 |---|---|---|
 | `native` | Telegram 原生 forward UI（顶部 "Forwarded from <访客名字>"，可点访客 profile） | 大多数场景；最直观 |
 | `tag` | 富 HTML 标签 (`↘ <name> · @handle · id:xxx`，带 tg://user 可点链接) + copyMessage（不显示 forward 元数据） | 想看到访客身份但不愿 bot 显得在"转发" |
-| `hex` | 不可读哈希标签 (`↘ a3f9c1b8...`) + copyMessage | 隐私最大化；admin 也只看到匿名哈希 |
+| `hex` | 不可读哈希标签 (`↘ a3f9c1b8...`) + copyMessage | 访客侧最严：admin 也只看到匿名哈希 |
 
 ---
 
@@ -402,8 +407,8 @@ docker compose up -d
 
 1. Worker-only 旧版：`git pull` 后在 `wrangler.toml` 加 `[vars] ENV_PUBLIC_BASE_URL = "https://<你的 worker>.workers.dev"`（新必填项），再 `npx wrangler deploy`
 2. `tg-relay-bot-docker` 分叉版：把 remote 换到本仓库再 `git pull`；`.env` 无新增字段，直接 `docker compose build --pull && docker compose up -d`
-3. 两轨都做：重跑一次 `curl 'https://.../admin/registerWebhook?s=<ENV_ADMIN_SECRET>'`，然后在管家 bot 里运行 `/host_migrate`——加密存量租户的明文 secrets，并给所有 tenant webhook 应用 `allowed_updates`。两步都幂等，可重跑
-4. 多管理员租户里、迁移前旧格式的转发消息映射按旧键存储：期间对个别旧消息 reply 可能提示找不到目标，30 天 TTL 内自然汰换，无需处理
+3. 两轨都做：重跑一次 `curl 'https://.../admin/registerWebhook?s=<ENV_ADMIN_SECRET>'`，然后在管家 bot 里运行 `/host_migrate`——加密存量租户的明文 secrets 与运营者 UID、把邀请列表改成哈希键，并给所有 tenant webhook 应用 `allowed_updates`。两步都幂等，可重跑
+4. 升级前写下的转发消息映射仍按旧键存储，升级后照样能回复；30 天 TTL 内自然汰换，无需处理。正在 `/setup` 半路的对话状态会丢，重发 `/setup` 即可
 
 ### 完全卸载
 
@@ -451,8 +456,13 @@ curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
 
 ### 我们能做到的
 
-- 访客 chatId 在存储层以 HMAC-SHA256 哈希存储（`userKey`），dump 存储也看不到 chatId 明文（唯一例外是回复路由用的 msg-map，保留 30 天后自动过期）
-- 所有 tenant 的 token、webhook secret、hashSecret 都以 AES-GCM 加密存储——单独拿到存储 dump（没有 `ENV_MASTER_ENC_KEY`）无法对 userKey 做离线暴力反推（从旧版本升级的部署需先运行一次 `/host_migrate`）
+首先保护的是运营者——bot 后面的人；访客只做基础保护。
+
+- 访客看到的发信人始终是 bot：回复用 copyMessage 发出，没有转发头、没有发信人；管理员发的未识别斜杠命令一律拦下，不会漏给访客；被拉黑或超限的访客得不到任何提示，也就没有信道去试探
+- 会暴露运营者的内容——名片、位置、地点、带元数据的文件——照常送达但会提醒，并能在 48 小时内 `/recall`
+- 存储里没有运营者身份：owner 与管理员的 UID 以 AES-GCM 加密存放，msg-map、相册标记、撤回指针、邀请列表、onboarding 状态这些键里放的是 HMAC 哈希，不是 UID；`ENV_DEBUG=1` 的事件日志同样只记哈希。单独拿到存储 dump 或日志的人知道这套部署托管了哪些 bot，不知道谁在运营（从旧版本升级的部署需先运行一次 `/host_migrate`）
+- 访客 chatId 在存储层以 HMAC-SHA256 哈希存储（`userKey`），dump 存储也看不到 chatId 明文（例外是回复路由用的 msg-map 与撤回指针，分别保留 30 天与 48 小时后自动过期）
+- 所有 tenant 的 token、webhook secret、hashSecret 都以 AES-GCM 加密存储——单独拿到存储 dump（没有 `ENV_MASTER_ENC_KEY`）无法对 userKey 做离线暴力反推
 - webhook 鉴权依赖每租户随机的 `secret_token` header（constant-time 比较，防侧信道），而非路径保密——路径中的 botId 本身是公开信息；secret 缺失或错误一律返回统一的 404，无法用于探测某个 bot 是否托管在此
 - Telegram 重发的 webhook 自动去重（`update_id`）
 - 每访客 60s 内最多 5 条；超出静默丢弃
@@ -470,9 +480,11 @@ curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
 | 反代/TLS 终止层（Docker 轨） | ✅ 技术上可见 | TLS 在反代处终止后内部明文转发到容器；如果反代是别人的（Cloudflare Tunnel 等），他们也能看到 |
 | Host（部署方） | ✅ | 日志 + 存储里有所有租户 token；多租户托管的固有代价 |
 | 任何拿到某 bot token 的人 | ✅ | token = 全权；切换 webhook 即可截获所有该 bot 的消息 |
-| 任何拿到存储 dump + `ENV_MASTER_ENC_KEY` 的人 | ✅ | 两者一起 = 解密所有 tenant token |
+| 任何拿到存储 dump + `ENV_MASTER_ENC_KEY` 的人 | ✅ | 两者一起 = 解密所有 tenant token，也能解出谁在运营哪个 bot |
 | ISP / 中间网络 | ❌ 仅元数据 | TLS 加密 |
 | 其它 Telegram 用户 | ❌ | 私聊为 1-to-1 |
+
+运营者身份还有几处这套东西管不到：Telegram 知道是哪个账号在 BotFather 里建的 bot；你回复的时段会透露作息；bot 的名字、头像、简介是你自己设的，别复用本人的；回复正文里写了什么只有你自己把关。
 
 ### 信任模型
 
@@ -492,14 +504,15 @@ curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
 | 数据 | 保留时长 |
 |---|---|
 | `tenant:{botId}:cfg`（含加密 token 与 secrets） | 直到 `/delete --yes` |
-| `tenant:{botId}:msg-map-{adminUid}-{id}` | 30 天后 TTL 过期 |
+| `tenant:{botId}:msg-map-{adminKey}-{id}`（`adminKey` 是管理员 UID 的 HMAC） | 30 天后 TTL 过期 |
+| `tenant:{botId}:recall-{adminKey}-{id}`（撤回指针） | 48 小时后 TTL 过期 |
 | `tenant:{botId}:block-{userKey}` | 直到 `/unblock` |
 | `tenant:{botId}:rate-{userKey}` | 60 秒后 TTL 过期 |
 | `tenant:{botId}:update-{id}` | 5 分钟后 TTL 过期 |
 | `tenant:{botId}:mg-*` / `album-*`（相册标签与限速去重标记） | 60 秒后 TTL 过期 |
-| `manager:user-state-{uid}` | 1 小时无活动后 TTL 过期 |
+| `manager:user-state-{hash}`（`hash` 是 UID 的 HMAC） | 1 小时无活动后 TTL 过期 |
 | `manager:dedup-update-{id}` | 5 分钟后 TTL 过期 |
-| `manager:allow-{uid}`（邀请列表） | 直到 `/uninvite` |
+| `manager:allow-{hash}`（邀请列表，值是加密的 UID） | 直到 `/uninvite` |
 
 ---
 

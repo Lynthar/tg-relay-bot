@@ -2,10 +2,11 @@ import {
   ALLOWED_UPDATES,
   MAX_TENANTS_PER_UID,
   MAX_ADMINS_PER_TENANT,
+  UID_HASH_PURPOSE,
   type Env,
   type HostConfig,
 } from './config';
-import { getEncKey } from './crypto';
+import { decrypt, deriveSecret, encrypt, getEncKey } from './crypto';
 import * as tg from './telegram';
 import { TelegramError, parseBotCommand } from './telegram';
 import {
@@ -19,11 +20,12 @@ import {
   listStoredByOwner,
   findStoredByUsername,
   decryptToken,
+  setAdminUids,
   storedWebhookSecret,
   type StoredEntry,
 } from './tenant';
 import type { TgMessage, DisplayMode } from './types';
-import { logError, logEvent } from './security';
+import { logError, logEvent, operatorKey } from './security';
 import type { KvStore } from './storage';
 import { type Locale, localeFromMessage, T } from './i18n';
 
@@ -34,33 +36,71 @@ interface UserState {
 const USER_STATE_TTL = 3600;
 const REPLY_MAX_LEN = 3500;
 
-async function getState(kv: KvStore, uid: string): Promise<UserState> {
-  const s = await kv.get<UserState>(`manager:user-state-${uid}`, { type: 'json' });
+// Host-level keys carry a keyed hash of the UID, never the UID: the secret is derived from
+// the master key, so a dump alone cannot tell who was invited or who is mid-onboarding.
+function hostHashSecret(host: HostConfig): Promise<string> {
+  return deriveSecret(host.masterEncKey, UID_HASH_PURPOSE);
+}
+
+async function hostUidKey(host: HostConfig, uid: string): Promise<string> {
+  return operatorKey(uid, await hostHashSecret(host));
+}
+
+async function getState(kv: KvStore, host: HostConfig, uid: string): Promise<UserState> {
+  const s = await kv.get<UserState>(`manager:user-state-${await hostUidKey(host, uid)}`, {
+    type: 'json',
+  });
   return s ?? { step: 'idle' };
 }
 
 // Onboarding allowlist. Only invited UIDs (plus the host) may /setup; everything
 // else on the manager bot stays open so prospective friends can run /whoami.
+// Key: hashed UID; value: the UID encrypted, so /invites can still list it.
 const INVITE_PREFIX = 'manager:allow-';
+const LEGACY_INVITE_VALUE = '1';
 
-export async function isInvited(kv: KvStore, uid: string): Promise<boolean> {
-  return (await kv.get(INVITE_PREFIX + uid)) === '1';
+export async function isInvited(kv: KvStore, host: HostConfig, uid: string): Promise<boolean> {
+  if ((await kv.get(INVITE_PREFIX + (await hostUidKey(host, uid)))) !== null) return true;
+  // Plaintext-keyed entry from before the hashed format; /host_migrate rewrites it.
+  return (await kv.get(INVITE_PREFIX + uid)) === LEGACY_INVITE_VALUE;
 }
 
-async function listInvited(kv: KvStore): Promise<string[]> {
-  const uids: string[] = [];
+async function addInvite(kv: KvStore, host: HostConfig, uid: string): Promise<void> {
+  const encKey = await getEncKey(host.masterEncKey);
+  await kv.put(INVITE_PREFIX + (await hostUidKey(host, uid)), await encrypt(uid, encKey));
+}
+
+async function removeInvite(kv: KvStore, host: HostConfig, uid: string): Promise<void> {
+  await kv.delete(INVITE_PREFIX + (await hostUidKey(host, uid)));
+  await kv.delete(INVITE_PREFIX + uid);
+}
+
+// Returns [uid, legacy] pairs; legacy entries are keyed by the plaintext UID.
+async function listInvited(kv: KvStore, host: HostConfig): Promise<[string, boolean][]> {
+  const encKey = await getEncKey(host.masterEncKey);
+  const out: [string, boolean][] = [];
   let cursor: string | undefined = undefined;
   for (;;) {
     const page = await kv.list({ prefix: INVITE_PREFIX, cursor });
-    for (const k of page.keys) uids.push(k.name.slice(INVITE_PREFIX.length));
+    for (const k of page.keys) {
+      const value = await kv.get(k.name);
+      if (value === null) continue;
+      if (value === LEGACY_INVITE_VALUE) out.push([k.name.slice(INVITE_PREFIX.length), true]);
+      else out.push([await decrypt(value, encKey), false]);
+    }
     if (page.list_complete) break;
     cursor = page.cursor;
   }
-  return uids;
+  return out;
 }
 
-async function setState(kv: KvStore, uid: string, state: UserState): Promise<void> {
-  await kv.put(`manager:user-state-${uid}`, JSON.stringify(state), {
+async function setState(
+  kv: KvStore,
+  host: HostConfig,
+  uid: string,
+  state: UserState,
+): Promise<void> {
+  await kv.put(`manager:user-state-${await hostUidKey(host, uid)}`, JSON.stringify(state), {
     expirationTtl: USER_STATE_TTL,
   });
 }
@@ -77,7 +117,7 @@ export async function handleManagerMessage(
   const isHost = senderId === host.hostUid;
   const locale = localeFromMessage(message);
 
-  const state = await getState(env.nfd, senderId);
+  const state = await getState(env.nfd, host, senderId);
 
   // The manager bot has no way to learn its own username, so parseBotCommand refuses every
   // /cmd@Suffix instead of assuming it is ours: a command the user pasted for someone else's
@@ -87,7 +127,7 @@ export async function handleManagerMessage(
   // Awaiting-token state: intercept escape commands first, otherwise treat the input as the token.
   if (state.step === 'awaiting_token') {
     if (parsed?.cmd === 'cancel') {
-      await setState(env.nfd, senderId, { step: 'idle' });
+      await setState(env.nfd, host, senderId, { step: 'idle' });
       await reply(host, senderId, T.manager.onboardingCancelled[locale]());
       return;
     }
@@ -116,15 +156,15 @@ export async function handleManagerMessage(
       await reply(host, senderId, T.manager.whoami[locale](senderId));
       return;
     case 'cancel':
-      await setState(env.nfd, senderId, { step: 'idle' });
+      await setState(env.nfd, host, senderId, { step: 'idle' });
       await reply(host, senderId, T.manager.stateReset[locale]());
       return;
     case 'setup':
-      if (!isHost && !(await isInvited(env.nfd, senderId))) {
+      if (!isHost && !(await isInvited(env.nfd, host, senderId))) {
         await reply(host, senderId, T.manager.setupNotInvited[locale]());
         return;
       }
-      await setState(env.nfd, senderId, { step: 'awaiting_token' });
+      await setState(env.nfd, host, senderId, { step: 'awaiting_token' });
       await reply(host, senderId, T.manager.setupPrompt[locale]());
       return;
     case 'list':
@@ -246,8 +286,8 @@ async function handleTokenInput(
 ): Promise<void> {
   // Re-check the invite here, not only at /setup: the awaiting_token state lives up
   // to an hour, during which the host may have /uninvite'd this user.
-  if (senderId !== host.hostUid && !(await isInvited(env.nfd, senderId))) {
-    await setState(env.nfd, senderId, { step: 'idle' });
+  if (senderId !== host.hostUid && !(await isInvited(env.nfd, host, senderId))) {
+    await setState(env.nfd, host, senderId, { step: 'idle' });
     await reply(host, senderId, T.manager.setupNotInvited[locale]());
     return;
   }
@@ -261,7 +301,7 @@ async function handleTokenInput(
 
   // Refuse to onboard the manager bot's own token —— would otherwise hijack the platform.
   if (botId === host.managerBotId) {
-    await setState(env.nfd, senderId, { step: 'idle' });
+    await setState(env.nfd, host, senderId, { step: 'idle' });
     await reply(host, senderId, T.manager.cannotOnboardSelf[locale]());
     return;
   }
@@ -270,7 +310,7 @@ async function handleTokenInput(
 
   const existing = await getStored(env.nfd, botId);
   if (existing) {
-    await setState(env.nfd, senderId, { step: 'idle' });
+    await setState(env.nfd, host, senderId, { step: 'idle' });
     await reply(host, senderId, T.manager.botAlreadyOnboarded[locale](existing.botUsername));
     return;
   }
@@ -279,9 +319,9 @@ async function handleTokenInput(
     // Soft cap, not an exact quota: KV has no atomic ops and list is eventually consistent, so
     // concurrent /setup can overshoot by one or two before converging. Acceptable — the cap only
     // stops one owner monopolising the shared write quota; an exact one needs a Durable Object.
-    const owned = await listStoredByOwner(env.nfd, senderId);
+    const owned = await listStoredByOwner(env.nfd, senderId, encKey);
     if (owned.length >= MAX_TENANTS_PER_UID) {
-      await setState(env.nfd, senderId, { step: 'idle' });
+      await setState(env.nfd, host, senderId, { step: 'idle' });
       await reply(host, senderId, T.manager.tenantLimitReached[locale](MAX_TENANTS_PER_UID));
       return;
     }
@@ -291,7 +331,7 @@ async function handleTokenInput(
   try {
     me = await tg.getMe(token);
   } catch (e) {
-    await setState(env.nfd, senderId, { step: 'idle' });
+    await setState(env.nfd, host, senderId, { step: 'idle' });
     await reply(
       host,
       senderId,
@@ -321,7 +361,7 @@ async function handleTokenInput(
     } catch {
       // best effort
     }
-    await setState(env.nfd, senderId, { step: 'idle' });
+    await setState(env.nfd, host, senderId, { step: 'idle' });
     await reply(
       host,
       senderId,
@@ -330,8 +370,11 @@ async function handleTokenInput(
     return;
   }
 
-  await setState(env.nfd, senderId, { step: 'idle' });
-  logEvent(host.debug, 'tenant_created', { botId, owner: senderId });
+  await setState(env.nfd, host, senderId, { step: 'idle' });
+  logEvent(host.debug, 'tenant_created', {
+    botId,
+    owner: await hostUidKey(host, senderId),
+  });
 
   // Bots cannot initiate chats: unless the owner has already opened the new bot and
   // pressed Start, every guest forward would silently 403. Probe once so the success
@@ -368,7 +411,7 @@ async function handleList(
   senderId: string,
   locale: Locale,
 ): Promise<void> {
-  const owned = await listStoredByOwner(env.nfd, senderId);
+  const owned = await listStoredByOwner(env.nfd, senderId, await getEncKey(host.masterEncKey));
   if (owned.length === 0) {
     await reply(host, senderId, T.manager.listEmpty[locale]());
     return;
@@ -382,6 +425,7 @@ async function handleList(
 
 async function resolveStored(
   env: Env,
+  host: HostConfig,
   arg: string,
   ownerUid: string,
   isHost: boolean,
@@ -392,6 +436,7 @@ async function resolveStored(
   const entry = await findStoredByUsername(
     env.nfd,
     username,
+    await getEncKey(host.masterEncKey),
     isHost ? undefined : ownerUid,
   );
   if (!entry) return T.manager.botNotFound[locale](username);
@@ -406,7 +451,7 @@ async function handleInfo(
   isHost: boolean,
   locale: Locale,
 ): Promise<void> {
-  const r = await resolveStored(env, args, senderId, isHost, locale);
+  const r = await resolveStored(env, host, args, senderId, isHost, locale);
   if (typeof r === 'string') return reply(host, senderId, r);
   const { botId, cfg } = r;
   const created = new Date(cfg.createdAt).toISOString().slice(0, 10);
@@ -416,8 +461,8 @@ async function handleInfo(
     [
       `@${cfg.botUsername}`,
       `bot_id: ${botId}`,
-      `owner: ${cfg.ownerUid}`,
-      `admins: ${cfg.adminUids.join(', ')}`,
+      `owner: ${r.ownerUid}`,
+      `admins: ${r.adminUids.join(', ')}`,
       `display: ${cfg.displayMode}`,
       `status: ${cfg.paused ? 'paused' : 'active'}`,
       `created: ${created}`,
@@ -444,7 +489,7 @@ async function handleDisplaymode(
     await reply(host, senderId, T.manager.displaymodeInvalid[locale]());
     return;
   }
-  const r = await resolveStored(env, username, senderId, isHost, locale);
+  const r = await resolveStored(env, host, username, senderId, isHost, locale);
   if (typeof r === 'string') return reply(host, senderId, r);
   r.cfg.displayMode = mode as DisplayMode;
   await putStored(env.nfd, r.botId, r.cfg);
@@ -460,7 +505,7 @@ async function handlePauseResume(
   isHost: boolean,
   locale: Locale,
 ): Promise<void> {
-  const r = await resolveStored(env, args, senderId, isHost, locale);
+  const r = await resolveStored(env, host, args, senderId, isHost, locale);
   if (typeof r === 'string') return reply(host, senderId, r);
 
   const encKey = await getEncKey(host.masterEncKey);
@@ -513,7 +558,7 @@ async function handleDelete(
     await reply(host, senderId, T.manager.deleteUsage[locale]());
     return;
   }
-  const r = await resolveStored(env, username, senderId, isHost, locale);
+  const r = await resolveStored(env, host, username, senderId, isHost, locale);
   if (typeof r === 'string') return reply(host, senderId, r);
 
   if (!yes) {
@@ -523,7 +568,10 @@ async function handleDelete(
   const encKey = await getEncKey(host.masterEncKey);
   const purged = await deleteTenant(env.nfd, r.botId, encKey);
   await reply(host, senderId, T.manager.deleted[locale](r.cfg.botUsername, purged));
-  logEvent(host.debug, 'tenant_deleted', { botId: r.botId, owner: senderId });
+  logEvent(host.debug, 'tenant_deleted', {
+    botId: r.botId,
+    owner: await hostUidKey(host, senderId),
+  });
 }
 
 async function handleHostList(
@@ -532,14 +580,14 @@ async function handleHostList(
   senderId: string,
   locale: Locale,
 ): Promise<void> {
-  const all = await listStored(env.nfd);
+  const all = await listStored(env.nfd, await getEncKey(host.masterEncKey));
   if (all.length === 0) {
     await reply(host, senderId, T.manager.hostListEmpty[locale]());
     return;
   }
   const lines = all.map(
-    ({ cfg }) =>
-      `@${cfg.botUsername} - owner ${cfg.ownerUid} - ${cfg.paused ? 'paused' : 'active'}`,
+    ({ cfg, ownerUid }) =>
+      `@${cfg.botUsername} - owner ${ownerUid} - ${cfg.paused ? 'paused' : 'active'}`,
   );
   await replyChunked(host, senderId, T.manager.hostListHeader[locale](lines.length), lines);
 }
@@ -559,16 +607,14 @@ async function handleAdmins(
   }
   const [username, action = 'list', uid] = parts;
 
-  const r = await resolveStored(env, username, senderId, isHost, locale);
+  const r = await resolveStored(env, host, username, senderId, isHost, locale);
   if (typeof r === 'string') {
     await reply(host, senderId, r);
     return;
   }
 
   if (action === 'list') {
-    const lines = r.cfg.adminUids.map(
-      (u) => `· ${u}${u === r.cfg.ownerUid ? ' (owner)' : ''}`,
-    );
+    const lines = r.adminUids.map((u) => `· ${u}${u === r.ownerUid ? ' (owner)' : ''}`);
     await reply(
       host,
       senderId,
@@ -593,21 +639,22 @@ async function handleAdmins(
   }
 
   if (action === 'add') {
-    if (r.cfg.adminUids.includes(uid)) {
+    if (r.adminUids.includes(uid)) {
       await reply(host, senderId, T.manager.adminAlready[locale](uid, r.cfg.botUsername));
       return;
     }
     // Every admin multiplies per-message Telegram calls and msg-map writes against
     // the platform-wide KV quota, and delivery is serial — cap it like tenants are.
-    if (r.cfg.adminUids.length >= MAX_ADMINS_PER_TENANT) {
+    if (r.adminUids.length >= MAX_ADMINS_PER_TENANT) {
       await reply(host, senderId, T.manager.adminLimitReached[locale](MAX_ADMINS_PER_TENANT));
       return;
     }
-    r.cfg.adminUids = [...r.cfg.adminUids, uid];
+    const encKey = await getEncKey(host.masterEncKey);
+    r.adminUids = [...r.adminUids, uid];
+    await setAdminUids(r.cfg, r.adminUids, encKey);
     await putStored(env.nfd, r.botId, r.cfg);
     // Same can't-initiate constraint as onboarding: the new admin receives nothing
     // until they have started the tenant bot themselves.
-    const encKey = await getEncKey(host.masterEncKey);
     const token = await decryptToken(r.cfg, encKey);
     const reachable = await probeViaTenantBot(
       token,
@@ -617,23 +664,24 @@ async function handleAdmins(
     await reply(
       host,
       senderId,
-      T.manager.adminAdded[locale](uid, r.cfg.adminUids.length, r.cfg.botUsername, reachable),
+      T.manager.adminAdded[locale](uid, r.adminUids.length, r.cfg.botUsername, reachable),
     );
     return;
   }
 
   // action === 'remove'
-  if (uid === r.cfg.ownerUid) {
+  if (uid === r.ownerUid) {
     await reply(host, senderId, T.manager.cannotRemoveOwner[locale]());
     return;
   }
-  if (!r.cfg.adminUids.includes(uid)) {
+  if (!r.adminUids.includes(uid)) {
     await reply(host, senderId, T.manager.adminNotInList[locale](uid, r.cfg.botUsername));
     return;
   }
-  r.cfg.adminUids = r.cfg.adminUids.filter((u) => u !== uid);
+  r.adminUids = r.adminUids.filter((u) => u !== uid);
+  await setAdminUids(r.cfg, r.adminUids, await getEncKey(host.masterEncKey));
   await putStored(env.nfd, r.botId, r.cfg);
-  await reply(host, senderId, T.manager.adminRemoved[locale](uid, r.cfg.adminUids.length));
+  await reply(host, senderId, T.manager.adminRemoved[locale](uid, r.adminUids.length));
 }
 
 const START_MESSAGE_MAX = 1000;
@@ -666,7 +714,7 @@ async function handleStartMessage(
     return;
   }
 
-  const r = await resolveStored(env, username, senderId, isHost, locale);
+  const r = await resolveStored(env, host, username, senderId, isHost, locale);
   if (typeof r === 'string') {
     await reply(host, senderId, r);
     return;
@@ -697,13 +745,13 @@ async function handleInvite(
     await reply(host, senderId, T.manager.uidMustBeNumeric[locale]());
     return;
   }
-  if (await isInvited(env.nfd, uid)) {
+  if (await isInvited(env.nfd, host, uid)) {
     await reply(host, senderId, T.manager.alreadyInvited[locale](uid));
     return;
   }
-  await env.nfd.put(INVITE_PREFIX + uid, '1');
+  await addInvite(env.nfd, host, uid);
   await reply(host, senderId, T.manager.invited[locale](uid));
-  logEvent(host.debug, 'invited', { uid });
+  logEvent(host.debug, 'invited', { uid: await hostUidKey(host, uid) });
 }
 
 async function handleUninvite(
@@ -722,13 +770,13 @@ async function handleUninvite(
     await reply(host, senderId, T.manager.uidMustBeNumeric[locale]());
     return;
   }
-  if (!(await isInvited(env.nfd, uid))) {
+  if (!(await isInvited(env.nfd, host, uid))) {
     await reply(host, senderId, T.manager.notInInviteList[locale](uid));
     return;
   }
-  await env.nfd.delete(INVITE_PREFIX + uid);
+  await removeInvite(env.nfd, host, uid);
   await reply(host, senderId, T.manager.uninvited[locale](uid));
-  logEvent(host.debug, 'uninvited', { uid });
+  logEvent(host.debug, 'uninvited', { uid: await hostUidKey(host, uid) });
 }
 
 async function handleInvites(
@@ -737,7 +785,7 @@ async function handleInvites(
   senderId: string,
   locale: Locale,
 ): Promise<void> {
-  const uids = await listInvited(env.nfd);
+  const uids = (await listInvited(env.nfd, host)).map(([uid]) => uid);
   if (uids.length === 0) {
     await reply(host, senderId, T.manager.invitesEmpty[locale]());
     return;
@@ -758,11 +806,19 @@ async function handleHostMigrate(
   senderId: string,
   locale: Locale,
 ): Promise<void> {
-  const all = await listStored(env.nfd);
   const encKey = await getEncKey(host.masterEncKey);
+  const all = await listStored(env.nfd, encKey);
   let migrated = 0;
   let webhooks = 0;
   let failures = 0;
+  // Invites written before the hashed-key format: re-key them the same way.
+  let invites = 0;
+  for (const [uid, legacy] of await listInvited(env.nfd, host)) {
+    if (!legacy) continue;
+    await addInvite(env.nfd, host, uid);
+    await env.nfd.delete(INVITE_PREFIX + uid);
+    invites++;
+  }
   for (const { botId, cfg } of all) {
     // Per-tenant isolation: one corrupt or unreachable tenant must not abort a host-triggered
     // batch, unlike the per-update convention where a non-TelegramError bubbles to the top-level
@@ -788,13 +844,14 @@ async function handleHostMigrate(
   await reply(
     host,
     senderId,
-    T.manager.hostMigrated[locale](all.length, migrated, webhooks, failures),
+    T.manager.hostMigrated[locale](all.length, migrated, webhooks, failures, invites),
   );
   logEvent(host.debug, 'host_migrated', {
     tenants: all.length,
     migrated,
     webhooks,
     failures,
+    invites,
   });
 }
 
@@ -805,7 +862,7 @@ async function handleHostDisable(
   args: string,
   locale: Locale,
 ): Promise<void> {
-  const r = await resolveStored(env, args, senderId, true, locale);
+  const r = await resolveStored(env, host, args, senderId, true, locale);
   if (typeof r === 'string') {
     await reply(host, senderId, r);
     return;
@@ -823,9 +880,12 @@ async function handleHostDisable(
   await reply(
     host,
     senderId,
-    T.manager.hostDisabled[locale](r.cfg.botUsername, r.cfg.ownerUid),
+    T.manager.hostDisabled[locale](r.cfg.botUsername, r.ownerUid),
   );
-  logEvent(host.debug, 'host_disabled', { botId: r.botId, owner: r.cfg.ownerUid });
+  logEvent(host.debug, 'host_disabled', {
+    botId: r.botId,
+    owner: await hostUidKey(host, r.ownerUid),
+  });
 }
 
 async function handleHostPurge(
@@ -843,7 +903,7 @@ async function handleHostPurge(
     return;
   }
 
-  const r = await resolveStored(env, username, senderId, true, locale);
+  const r = await resolveStored(env, host, username, senderId, true, locale);
   if (typeof r === 'string') {
     await reply(host, senderId, r);
     return;
@@ -853,7 +913,7 @@ async function handleHostPurge(
     await reply(
       host,
       senderId,
-      T.manager.hostPurgeConfirm[locale](r.cfg.botUsername, r.cfg.ownerUid),
+      T.manager.hostPurgeConfirm[locale](r.cfg.botUsername, r.ownerUid),
     );
     return;
   }
@@ -863,7 +923,10 @@ async function handleHostPurge(
   await reply(
     host,
     senderId,
-    T.manager.hostPurged[locale](r.cfg.botUsername, purged, r.cfg.ownerUid),
+    T.manager.hostPurged[locale](r.cfg.botUsername, purged, r.ownerUid),
   );
-  logEvent(host.debug, 'host_purged', { botId: r.botId, owner: r.cfg.ownerUid });
+  logEvent(host.debug, 'host_purged', {
+    botId: r.botId,
+    owner: await hostUidKey(host, r.ownerUid),
+  });
 }

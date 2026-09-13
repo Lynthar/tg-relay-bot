@@ -77,25 +77,25 @@ export interface MsgMapEntry {
   createdAt: number;
 }
 
-// Keyed by (adminId, adminMessageId): Telegram message_ids are unique only within a single
-// chat, so forwards delivered to different admins can carry the same message_id. Without the
-// admin dimension the entries collide and a reply can be routed to the wrong guest.
+// Keyed by (adminKey, adminMessageId): Telegram message_ids are unique only within a single
+// chat, so forwards delivered to different admins can carry the same message_id. adminKey is
+// operatorKey(adminUid, hashSecret) — the raw UID must not appear in a key (see security.ts).
 export async function putMsgMap(
   skv: ScopedKV,
-  adminId: string,
+  adminKey: string,
   adminMessageId: number,
   entry: MsgMapEntry,
   ttlSec: number,
 ): Promise<void> {
-  await skv.put(`msg-map-${adminId}-${adminMessageId}`, JSON.stringify(entry), ttlSec);
+  await skv.put(`msg-map-${adminKey}-${adminMessageId}`, JSON.stringify(entry), ttlSec);
 }
 
 export async function getMsgMap(
   skv: ScopedKV,
-  adminId: string,
+  adminKey: string,
   adminMessageId: number,
 ): Promise<MsgMapEntry | null> {
-  return await skv.getJson<MsgMapEntry>(`msg-map-${adminId}-${adminMessageId}`);
+  return await skv.getJson<MsgMapEntry>(`msg-map-${adminKey}-${adminMessageId}`);
 }
 
 // Pre-admin-scoped key format. Only safe to consult when the tenant has exactly one admin
@@ -106,4 +106,37 @@ export async function getLegacyMsgMap(
   adminMessageId: number,
 ): Promise<MsgMapEntry | null> {
   return await skv.getJson<MsgMapEntry>(`msg-map-${adminMessageId}`);
+}
+
+// Points from the warning the bot sent an admin (about a reply that may identify them)
+// to the copy delivered to the guest, so the admin can /recall it. Short-lived like msg-map.
+export interface RecallEntry {
+  chatId: number | string;
+  messageId: number;
+}
+
+export async function putRecall(
+  skv: ScopedKV,
+  adminKey: string,
+  warningMessageId: number,
+  entry: RecallEntry,
+  ttlSec: number,
+): Promise<void> {
+  await skv.put(`recall-${adminKey}-${warningMessageId}`, JSON.stringify(entry), ttlSec);
+}
+
+export async function getRecall(
+  skv: ScopedKV,
+  adminKey: string,
+  warningMessageId: number,
+): Promise<RecallEntry | null> {
+  return await skv.getJson<RecallEntry>(`recall-${adminKey}-${warningMessageId}`);
+}
+
+export async function deleteRecall(
+  skv: ScopedKV,
+  adminKey: string,
+  warningMessageId: number,
+): Promise<void> {
+  await skv.delete(`recall-${adminKey}-${warningMessageId}`);
 }

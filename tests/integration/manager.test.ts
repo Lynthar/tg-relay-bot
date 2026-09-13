@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HOST_UID,
   MANAGER_BOT_ID,
@@ -11,6 +11,9 @@ import {
   provisionLegacyTenant,
   provisionTenant,
   tgMock,
+  storedOperators,
+  setTenantAdmins,
+  hostUidKey,
 } from '../helpers';
 import { getStored, putStored, deleteStored } from '../../src/tenant';
 import { ScopedKV } from '../../src/storage';
@@ -49,8 +52,7 @@ describe('/admins', () => {
     const t = await provisionTenant({ botId: '400002', ownerUid: '400002' });
     await sendManagerCmd(400002, `/admins ${t.cfg.botUsername} add 555111`);
     await flush();
-    const updated = await getStored(env.nfd, t.botId);
-    expect(updated?.adminUids).toContain('555111');
+    expect((await storedOperators(t.botId))?.adminUids).toContain('555111');
     expect(lastReplyText()).toMatch(/已添加管理员 555111/);
     // Default mock lets the reachability probe succeed → no Start warning.
     expect(lastReplyText()).not.toMatch(/点 Start/);
@@ -64,7 +66,7 @@ describe('/admins', () => {
     await sendManagerCmd(400003, `/admins ${t.cfg.botUsername} add 555222`);
     await flush();
     expect(lastReplyText()).toMatch(/已经是/);
-    const updated = await getStored(env.nfd, t.botId);
+    const updated = await storedOperators(t.botId);
     expect(updated?.adminUids.filter((u) => u === '555222').length).toBe(1);
   });
 
@@ -75,8 +77,7 @@ describe('/admins', () => {
     tgMock.reset();
     await sendManagerCmd(400004, `/admins ${t.cfg.botUsername} remove 555333`);
     await flush();
-    const updated = await getStored(env.nfd, t.botId);
-    expect(updated?.adminUids).not.toContain('555333');
+    expect((await storedOperators(t.botId))?.adminUids).not.toContain('555333');
     expect(lastReplyText()).toMatch(/已移除管理员 555333/);
   });
 
@@ -85,8 +86,7 @@ describe('/admins', () => {
     await sendManagerCmd(400005, `/admins ${t.cfg.botUsername} remove 400005`);
     await flush();
     expect(lastReplyText()).toMatch(/不能移除 owner/);
-    const updated = await getStored(env.nfd, t.botId);
-    expect(updated?.adminUids).toContain('400005');
+    expect((await storedOperators(t.botId))?.adminUids).toContain('400005');
   });
 
   it('rejects non-numeric uid', async () => {
@@ -98,16 +98,16 @@ describe('/admins', () => {
 
   it('add refuses when the admin cap is reached', async () => {
     const t = await provisionTenant({ botId: '400012', ownerUid: '400012' });
-    const stored = await getStored(env.nfd, t.botId);
-    stored!.adminUids = ['400012', ...Array.from({ length: 9 }, (_, i) => String(600000 + i))];
-    await putStored(env.nfd, t.botId, stored!);
+    await setTenantAdmins(t.botId, [
+      '400012',
+      ...Array.from({ length: 9 }, (_, i) => String(600000 + i)),
+    ]);
 
     await sendManagerCmd(400012, `/admins ${t.cfg.botUsername} add 700001`);
     await flush();
 
     expect(lastReplyText()).toMatch(/最多 10 个管理员/);
-    const after = await getStored(env.nfd, t.botId);
-    expect(after?.adminUids).not.toContain('700001');
+    expect((await storedOperators(t.botId))?.adminUids).not.toContain('700001');
   });
 
   it("non-owner cannot manage another owner's bot", async () => {
@@ -115,8 +115,7 @@ describe('/admins', () => {
     await sendManagerCmd(123456, `/admins ${t.cfg.botUsername} add 555444`);
     await flush();
     expect(lastReplyText()).toMatch(/未找到/);
-    const updated = await getStored(env.nfd, t.botId);
-    expect(updated?.adminUids).not.toContain('555444');
+    expect((await storedOperators(t.botId))?.adminUids).not.toContain('555444');
   });
 });
 
@@ -224,7 +223,7 @@ describe('invite gating: /invite /uninvite /invites + gated /setup', () => {
     await sendManagerCmd(620002, '/invite 620003');
     await flush();
     expect(lastReplyText()).toMatch(/仅 host/);
-    expect(await env.nfd.get('manager:allow-620003')).toBeNull();
+    expect(await env.nfd.get(`manager:allow-${await hostUidKey(620003)}`)).toBeNull();
   });
 
   it('host /invite rejects non-numeric uid', async () => {
@@ -236,7 +235,8 @@ describe('invite gating: /invite /uninvite /invites + gated /setup', () => {
   it('host /invite writes the allow key and /invites lists it', async () => {
     await sendManagerCmd(Number(HOST_UID), '/invite 620010');
     await flush();
-    expect(await env.nfd.get('manager:allow-620010')).toBe('1');
+    expect(await env.nfd.get('manager:allow-620010')).toBeNull();
+    expect(await env.nfd.get(`manager:allow-${await hostUidKey(620010)}`)).not.toBeNull();
     tgMock.reset();
     await sendManagerCmd(Number(HOST_UID), '/invites');
     await flush();
@@ -268,7 +268,8 @@ describe('invite gating: /invite /uninvite /invites + gated /setup', () => {
 
     expect(lastReplyText()).toMatch(/已上线/);
     const stored = await getStored(env.nfd, '620101');
-    expect(stored?.ownerUid).toBe(String(friend));
+    expect((await storedOperators('620101'))?.ownerUid).toBe(String(friend));
+    expect(stored?.ownerUid).toBeUndefined();
     expect(stored?.botUsername).toBe('invited_test_bot');
     const hooks = tgMock.getCallsByMethod('setWebhook');
     expect(hooks.length).toBe(1);
@@ -335,8 +336,7 @@ describe('invite gating: /invite /uninvite /invites + gated /setup', () => {
     await sendManagerCmd(owner, `/admins ${t.cfg.botUsername} add 555999`);
     await flush();
 
-    const updated = await getStored(env.nfd, t.botId);
-    expect(updated?.adminUids).toContain('555999');
+    expect((await storedOperators(t.botId))?.adminUids).toContain('555999');
     expect(lastReplyText()).toMatch(/已添加管理员 555999/);
     expect(lastReplyText()).toMatch(/点 Start/);
   });
@@ -349,7 +349,7 @@ describe('invite gating: /invite /uninvite /invites + gated /setup', () => {
     await flush();
     await sendManagerCmd(Number(HOST_UID), `/uninvite ${friend}`);
     await flush();
-    expect(await env.nfd.get(`manager:allow-${friend}`)).toBeNull();
+    expect(await env.nfd.get(`manager:allow-${await hostUidKey(friend)}`)).toBeNull();
 
     await sendManagerCmd(friend, '620201:TESTtoken_abc');
     await flush();
@@ -517,6 +517,25 @@ describe('/pause /resume /delete', () => {
   });
 });
 
+describe('recovery when operator ids cannot be decrypted', () => {
+  it('host can still /host_purge a tenant whose operator ids are undecryptable', async () => {
+    const t = await provisionTenant({ botId: '620620', ownerUid: '620620' });
+    const cfg = (await getStored(env.nfd, t.botId))!;
+    cfg.adminUidsEnc = 'AAAAAAAAAAAAAAAAAAAA';
+    cfg.ownerUidEnc = 'AAAAAAAAAAAAAAAAAAAA';
+    await putStored(env.nfd, t.botId, cfg);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await sendManagerCmd(Number(HOST_UID), `/host_purge ${t.cfg.botUsername} --yes`);
+      await flush();
+    } finally {
+      err.mockRestore();
+    }
+    expect(lastReplyText()).toMatch(/已被 host 删除/);
+    expect(await getStored(env.nfd, t.botId)).toBeNull();
+  });
+});
+
 describe('/host_migrate', () => {
   it('non-host is refused', async () => {
     await sendManagerCmd(123456, '/host_migrate');
@@ -524,8 +543,9 @@ describe('/host_migrate', () => {
     expect(lastReplyText()).toMatch(/仅 host/);
   });
 
-  it('encrypts legacy secrets, refreshes the webhook, and relay keeps working', async () => {
-    const t = await provisionLegacyTenant({ botId: '620600', ownerUid: '620600' });
+  it('encrypts legacy secrets and operator ids, refreshes the webhook, and relay keeps working', async () => {
+    const t = await provisionLegacyTenant({ botId: '620600', ownerUid: '620650' });
+    await env.nfd.put('manager:allow-620699', '1'); // pre-hash invite format
     await sendManagerCmd(Number(HOST_UID), '/host_migrate');
     await flush();
 
@@ -534,6 +554,12 @@ describe('/host_migrate', () => {
     expect(stored?.webhookSecret).toBeUndefined();
     expect(stored?.hashSecretEnc).toBeDefined();
     expect(stored?.webhookSecretEnc).toBeDefined();
+    expect(stored?.ownerUid).toBeUndefined();
+    expect(stored?.adminUids).toBeUndefined();
+    expect(JSON.stringify(stored)).not.toContain('620650');
+    expect(await storedOperators(t.botId)).toEqual({ ownerUid: '620650', adminUids: ['620650'] });
+    expect(await env.nfd.get('manager:allow-620699')).toBeNull();
+    expect(await env.nfd.get(`manager:allow-${await hostUidKey(620699)}`)).not.toBeNull();
 
     const hooks = tgMock
       .getCallsByMethod('setWebhook')
@@ -541,7 +567,12 @@ describe('/host_migrate', () => {
     expect(hooks.length).toBe(1);
     expect(hooks[0].body?.secret_token).toBe(t.webhookSecret);
     expect(hooks[0].body?.allowed_updates).toEqual(['message']);
-    expect(lastReplyText()).toMatch(/完成 secrets 加密迁移/);
+    expect(lastReplyText()).toMatch(/完成加密迁移/);
+    expect(lastReplyText()).toMatch(/1 条邀请已改为哈希键/);
+    tgMock.reset();
+    await sendManagerCmd(Number(HOST_UID), '/invites');
+    await flush();
+    expect(lastReplyText()).toMatch(/620699/);
 
     // The same webhook secret still authenticates after migration.
     tgMock.reset();
@@ -562,7 +593,7 @@ describe('/host_migrate', () => {
     tgMock.reset();
     await sendManagerCmd(Number(HOST_UID), '/host_migrate');
     await flush();
-    const m = lastReplyText().match(/：(\d+) 个完成 secrets 加密迁移/);
+    const m = lastReplyText().match(/：(\d+) 个完成加密迁移/);
     expect(m?.[1]).toBe('0');
   });
 
@@ -738,7 +769,7 @@ describe('manager dedup mark is skipped for strangers (KV write quota protection
     expect(await env.nfd.get(`manager:dedup-update-${updateId}`)).toBe('1');
   });
 
-  it('an invited user writes the dedup mark', async () => {
+  it('an invited user writes the dedup mark (legacy plaintext-keyed invite still admits)', async () => {
     await env.nfd.put('manager:allow-876543', '1');
     const updateId = nid();
     const secret = await managerWebhookSecret();

@@ -24,6 +24,10 @@ export interface HostConfig {
 export const RATE_LIMIT_WINDOW_SEC = 60;
 export const RATE_LIMIT_MAX = 5;
 export const MSG_MAP_TTL_SEC = 30 * 24 * 3600;
+// Telegram lets a bot delete its own messages for 48 hours; a longer-lived pointer is useless.
+export const RECALL_TTL_SEC = 48 * 3600;
+// HKDF info string for the host-level UID hash secret (manager keys and debug logs).
+export const UID_HASH_PURPOSE = 'tg-relay-bot/uid-hash/v1';
 export const DEDUP_TTL_SEC = 5 * 60;
 export const MEDIA_GROUP_TAG_TTL_SEC = 60;
 // Per-owner tenant cap (host exempt). KV write quota is platform-wide, so one

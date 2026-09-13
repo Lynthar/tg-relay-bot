@@ -7,15 +7,18 @@ import type { KvStore, KvListResult } from './storage';
 
 export interface StoredTenantCfg {
   tokenEnc: string;
-  // AES-GCM-encrypted at rest (current format).
+  // AES-GCM-encrypted at rest (current format). Operator ids are encrypted too: a dump
+  // without the master key must not say which Telegram account runs which bot.
   webhookSecretEnc?: string;
   hashSecretEnc?: string;
+  ownerUidEnc?: string;
+  adminUidsEnc?: string;
   // Legacy plaintext from records written before encryption-at-rest. Still readable
   // until the host runs /host_migrate; never written by new code.
   webhookSecret?: string;
   hashSecret?: string;
-  adminUids: string[];
-  ownerUid: string;
+  adminUids?: string[];
+  ownerUid?: string;
   botUsername: string;
   displayMode: DisplayMode;
   startMessage: string;
@@ -37,9 +40,17 @@ export interface TenantCfg {
   paused: boolean;
 }
 
+// A listing row: the stored record plus its operator ids already decrypted.
 export interface StoredEntry {
   botId: string;
   cfg: StoredTenantCfg;
+  ownerUid: string;
+  adminUids: string[];
+}
+
+export interface Operators {
+  ownerUid: string;
+  adminUids: string[];
 }
 
 const DEFAULT_START =
@@ -93,8 +104,29 @@ export async function storedWebhookSecret(
   return storedSecret(cfg.webhookSecretEnc, cfg.webhookSecret, encKey, 'webhookSecret');
 }
 
-// Encrypt any legacy plaintext secrets in place. Returns true if cfg changed
-// (caller persists). Idempotent.
+export async function readOperators(
+  cfg: StoredTenantCfg,
+  encKey: CryptoKey,
+): Promise<Operators> {
+  const ownerUid = await storedSecret(cfg.ownerUidEnc, cfg.ownerUid, encKey, 'ownerUid');
+  const adminUids = cfg.adminUidsEnc
+    ? (JSON.parse(await decrypt(cfg.adminUidsEnc, encKey)) as string[])
+    : cfg.adminUids;
+  if (!adminUids) throw new Error('tenant cfg missing adminUids');
+  return { ownerUid, adminUids };
+}
+
+export async function setAdminUids(
+  cfg: StoredTenantCfg,
+  adminUids: string[],
+  encKey: CryptoKey,
+): Promise<void> {
+  cfg.adminUidsEnc = await encrypt(JSON.stringify(adminUids), encKey);
+  delete cfg.adminUids;
+}
+
+// Encrypt any legacy plaintext secrets and operator ids in place. Returns true if cfg
+// changed (caller persists). Idempotent.
 export async function encryptLegacySecrets(
   cfg: StoredTenantCfg,
   encKey: CryptoKey,
@@ -110,6 +142,15 @@ export async function encryptLegacySecrets(
     delete cfg.webhookSecret;
     changed = true;
   }
+  if (!cfg.ownerUidEnc && cfg.ownerUid) {
+    cfg.ownerUidEnc = await encrypt(cfg.ownerUid, encKey);
+    delete cfg.ownerUid;
+    changed = true;
+  }
+  if (!cfg.adminUidsEnc && cfg.adminUids) {
+    await setAdminUids(cfg, cfg.adminUids, encKey);
+    changed = true;
+  }
   return changed;
 }
 
@@ -118,14 +159,15 @@ async function storedToTenant(
   raw: StoredTenantCfg,
   encKey: CryptoKey,
 ): Promise<TenantCfg> {
+  const operators = await readOperators(raw, encKey);
   return {
     botId,
     botToken: await decrypt(raw.tokenEnc, encKey),
     botUsername: raw.botUsername,
     webhookSecret: await storedSecret(raw.webhookSecretEnc, raw.webhookSecret, encKey, 'webhookSecret'),
     hashSecret: await storedSecret(raw.hashSecretEnc, raw.hashSecret, encKey, 'hashSecret'),
-    adminUids: new Set(raw.adminUids),
-    ownerUid: raw.ownerUid,
+    adminUids: new Set(operators.adminUids),
+    ownerUid: operators.ownerUid,
     displayMode: raw.displayMode,
     startMessage: raw.startMessage,
     createdAt: raw.createdAt,
@@ -160,8 +202,8 @@ export async function createTenant(
     tokenEnc: await encrypt(args.token, encKey),
     webhookSecretEnc: await encrypt(webhookSecret, encKey),
     hashSecretEnc: await encrypt(hashSecret, encKey),
-    adminUids: [args.ownerUid],
-    ownerUid: args.ownerUid,
+    ownerUidEnc: await encrypt(args.ownerUid, encKey),
+    adminUidsEnc: await encrypt(JSON.stringify([args.ownerUid]), encKey),
     botUsername: args.botUsername,
     displayMode: 'native',
     startMessage: DEFAULT_START,
@@ -191,37 +233,53 @@ export async function listTenantIds(kv: KvStore): Promise<string[]> {
   return ids;
 }
 
-export async function listStored(kv: KvStore): Promise<StoredEntry[]> {
+// Operator ids that cannot be decrypted (changed or lost master key) come back empty rather
+// than throwing: the host must still be able to find the record by username and purge it,
+// which is the documented recovery path. Owner-filtered lookups simply never match it.
+export async function getStoredEntry(
+  kv: KvStore,
+  botId: string,
+  encKey: CryptoKey,
+): Promise<StoredEntry | null> {
+  const cfg = await getStored(kv, botId);
+  if (!cfg) return null;
+  try {
+    return { botId, cfg, ...(await readOperators(cfg, encKey)) };
+  } catch (e) {
+    logError('operators_decrypt', e, { botId });
+    return { botId, cfg, ownerUid: '', adminUids: [] };
+  }
+}
+
+// Owner lookups decrypt every record: there is no owner index, and an index keyed by a
+// plaintext UID would defeat encrypting it. Fine at personal scale (tens of tenants).
+export async function listStored(kv: KvStore, encKey: CryptoKey): Promise<StoredEntry[]> {
   const ids = await listTenantIds(kv);
-  const entries = await Promise.all(
-    ids.map(async (id) => {
-      const cfg = await getStored(kv, id);
-      return cfg ? { botId: id, cfg } : null;
-    }),
-  );
+  const entries = await Promise.all(ids.map((id) => getStoredEntry(kv, id, encKey)));
   return entries.filter((x): x is StoredEntry => x !== null);
 }
 
 export async function listStoredByOwner(
   kv: KvStore,
   ownerUid: string,
+  encKey: CryptoKey,
 ): Promise<StoredEntry[]> {
-  const all = await listStored(kv);
-  return all.filter((x) => x.cfg.ownerUid === ownerUid);
+  const all = await listStored(kv, encKey);
+  return all.filter((x) => x.ownerUid === ownerUid);
 }
 
 export async function findStoredByUsername(
   kv: KvStore,
   username: string,
+  encKey: CryptoKey,
   ownerUid?: string,
 ): Promise<StoredEntry | null> {
-  const all = await listStored(kv);
+  const all = await listStored(kv, encKey);
   const u = username.toLowerCase().replace(/^@/, '');
   return (
     all.find(
       (x) =>
-        x.cfg.botUsername.toLowerCase() === u &&
-        (ownerUid ? x.cfg.ownerUid === ownerUid : true),
+        x.cfg.botUsername.toLowerCase() === u && (ownerUid ? x.ownerUid === ownerUid : true),
     ) ?? null
   );
 }

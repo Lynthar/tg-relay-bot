@@ -16,6 +16,7 @@ import {
   tryPut,
   logEvent,
   logError,
+  operatorKey,
 } from './security';
 import { handleAdminMessage } from './commands';
 import type { TgMessage } from './types';
@@ -116,6 +117,7 @@ async function relayToAdmins(
   };
 
   for (const adminId of cfg.adminUids) {
+    const adminKey = await operatorKey(adminId, cfg.hashSecret);
     try {
       if (cfg.displayMode === 'native') {
         const fwd = await tg.forwardMessage(cfg.botToken, {
@@ -123,11 +125,11 @@ async function relayToAdmins(
           from_chat_id: message.chat.id,
           message_id: message.message_id,
         });
-        await tryPutMsgMap(skv, adminId, fwd.message_id, entry);
+        await tryPutMsgMap(skv, adminKey, fwd.message_id, entry);
       } else {
         const useHtml = cfg.displayMode === 'tag';
         const emitTag = message.media_group_id
-          ? await shouldEmitTag(skv, adminId, message.media_group_id)
+          ? await shouldEmitTag(skv, adminKey, message.media_group_id)
           : true;
         if (emitTag) {
           const tagText = useHtml ? buildRichTag(message, uk) : buildHexTag(message, uk);
@@ -136,16 +138,16 @@ async function relayToAdmins(
             text: tagText,
             ...(useHtml ? { parse_mode: 'HTML' as const, disable_web_page_preview: true } : {}),
           });
-          await tryPutMsgMap(skv, adminId, tagMsg.message_id, entry);
+          await tryPutMsgMap(skv, adminKey, tagMsg.message_id, entry);
         }
         const copied = await tg.copyMessage(cfg.botToken, {
           chat_id: adminId,
           from_chat_id: message.chat.id,
           message_id: message.message_id,
         });
-        await tryPutMsgMap(skv, adminId, copied.message_id, entry);
+        await tryPutMsgMap(skv, adminKey, copied.message_id, entry);
       }
-      logEvent(debug, 'forwarded', { uk, admin: adminId });
+      logEvent(debug, 'forwarded', { uk, admin: adminKey });
     } catch (e) {
       if (e instanceof TelegramError) {
         // botId, not adminId: an admin's UID is a chatId, which must never reach an
@@ -163,12 +165,12 @@ async function relayToAdmins(
 // already received it — so a KV write throttle here must not abort delivery.
 async function tryPutMsgMap(
   skv: ScopedKV,
-  adminId: string,
+  adminKey: string,
   adminMessageId: number,
   entry: MsgMapEntry,
 ): Promise<void> {
   try {
-    await putMsgMap(skv, adminId, adminMessageId, entry, MSG_MAP_TTL_SEC);
+    await putMsgMap(skv, adminKey, adminMessageId, entry, MSG_MAP_TTL_SEC);
   } catch (e) {
     logError('msg_map_put', e);
   }
@@ -179,10 +181,10 @@ async function tryPutMsgMap(
 // case is "one extra tag or one missing tag" — never a data error.
 async function shouldEmitTag(
   skv: ScopedKV,
-  adminId: string,
+  adminKey: string,
   mediaGroupId: string,
 ): Promise<boolean> {
-  const key = `mg-${adminId}-${mediaGroupId}`;
+  const key = `mg-${adminKey}-${mediaGroupId}`;
   if (await skv.getString(key)) return false;
   await tryPut(skv, key, '1', MEDIA_GROUP_TAG_TTL_SEC, 'mg_tag_put');
   return true;

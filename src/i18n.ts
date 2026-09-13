@@ -394,10 +394,10 @@ export const T = {
         `Confirm force-delete @${username} (owner ${ownerUid})? Will unregister the webhook and purge all data; irreversible.\nTo confirm: /host_purge ${username} --yes`,
     ),
     hostMigrated: bil(
-      (total: number, migrated: number, webhooks: number, failures: number) =>
-        `共 ${total} 个租户：${migrated} 个完成 secrets 加密迁移，${webhooks} 个 webhook 已刷新（allowed_updates 生效）${failures > 0 ? `，${failures} 个刷新失败（token 可能已失效，/host_list 检查）` : ''}。此命令可重复运行。`,
-      (total: number, migrated: number, webhooks: number, failures: number) =>
-        `${total} tenants: ${migrated} had secrets encrypted, ${webhooks} webhooks refreshed (allowed_updates applied)${failures > 0 ? `, ${failures} refresh failures (token may be revoked, check /host_list)` : ''}. Safe to run again.`,
+      (total: number, migrated: number, webhooks: number, failures: number, invites: number) =>
+        `共 ${total} 个租户：${migrated} 个完成加密迁移（secrets 与运营者 UID），${webhooks} 个 webhook 已刷新（allowed_updates 生效）${failures > 0 ? `，${failures} 个刷新失败（token 可能已失效，/host_list 检查）` : ''}${invites > 0 ? `；${invites} 条邀请已改为哈希键` : ''}。此命令可重复运行。`,
+      (total: number, migrated: number, webhooks: number, failures: number, invites: number) =>
+        `${total} tenants: ${migrated} had secrets and operator ids encrypted, ${webhooks} webhooks refreshed (allowed_updates applied)${failures > 0 ? `, ${failures} refresh failures (token may be revoked, check /host_list)` : ''}${invites > 0 ? `; ${invites} invites re-keyed` : ''}. Safe to run again.`,
     ),
     hostPurged: bil(
       (username: string, purged: number, ownerUid: string) =>
@@ -424,6 +424,9 @@ export const T = {
             '回复一条转发的消息：',
             '  发任意内容 → 回复给原发送者',
             '  发 /block /unblock /checkblock → 屏蔽管理',
+            '',
+            '名片、位置、地点、文件与音频文件会照常送达，但可能暴露你的身份或带元数据；',
+            '送达后会收到提醒，回复那条提醒发 /recall 可在 48 小时内撤回。',
           ].join('\n');
         }
         return [
@@ -447,6 +450,10 @@ export const T = {
             'Reply to a forwarded message:',
             '  any content → reply to the original sender',
             '  /block /unblock /checkblock → block management',
+            '',
+            'Contacts, locations, venues, files and audio files are delivered as usual but may',
+            'identify you or carry metadata; you get a notice, and replying /recall to that',
+            'notice deletes the copy from the guest chat within 48 hours.',
           ].join('\n');
         }
         return [
@@ -522,5 +529,38 @@ export const T = {
       () => '操作未生效（存储访问失败），请稍后重试。',
       () => 'The operation did not take effect (storage access failed); please retry later.',
     ),
+    exposureNotice: bil(
+      (kind: ExposureKind) =>
+        `已送达。提醒：${EXPOSURE_ZH[kind]}。回复本条发 /recall 可在 48 小时内从对方那里撤回。`,
+      (kind: ExposureKind) =>
+        `Delivered. Note: ${EXPOSURE_EN[kind]}. Reply /recall to this notice to delete it from the guest's chat within 48 hours.`,
+    ),
+    recalled: bil(
+      () => '已从对方那里撤回。',
+      () => 'Deleted from the guest chat.',
+    ),
+    recallNothing: bil(
+      () =>
+        '没有可撤回的记录：/recall 只能回复那条「已送达」提醒使用，且限 48 小时内。',
+      () =>
+        'Nothing to recall: /recall only works as a reply to the "Delivered" notice, within 48 hours.',
+    ),
+    recallFailed: bil(
+      (detail: string) => `撤回失败：${detail}`,
+      (detail: string) => `Recall failed: ${detail}`,
+    ),
   },
+};
+
+// What each content kind can give away about the admin who sent it.
+export type ExposureKind = 'contact' | 'location' | 'file';
+const EXPOSURE_ZH: Record<ExposureKind, string> = {
+  contact: '名片会把这个联系人的号码和名字原样交给对方',
+  location: '位置信息会暴露你所在的地方',
+  file: '作为文件发送的内容保留原始元数据（如 EXIF 位置、作者字段、ID3 标签），Telegram 不会清理',
+};
+const EXPOSURE_EN: Record<ExposureKind, string> = {
+  contact: "the contact card hands the guest that person's number and name as-is",
+  location: 'location data reveals where you are',
+  file: 'content sent as a file keeps its original metadata (EXIF position, author fields, ID3 tags); Telegram does not strip it',
 };

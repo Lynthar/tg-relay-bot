@@ -19,6 +19,13 @@ export interface TgMessage {
   from?: TgUser;
   reply_to_message?: TgMessage;
   media_group_id?: string;
+  // Only presence matters: these are the content kinds that can identify the admin
+  // who sends them (see exposureKind in commands.ts).
+  contact?: object;
+  location?: object;
+  venue?: object;
+  document?: object;
+  audio?: object;
 }
 
 export interface TgUpdate {

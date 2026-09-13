@@ -1,12 +1,20 @@
 import * as tg from './telegram';
 import { TelegramError, parseBotCommand } from './telegram';
-import { getMsgMap, getLegacyMsgMap, type ScopedKV } from './storage';
-import { setBlocked, clearBlocked, isBlocked, logError, logEvent } from './security';
+import { RECALL_TTL_SEC } from './config';
+import {
+  deleteRecall,
+  getMsgMap,
+  getLegacyMsgMap,
+  getRecall,
+  putRecall,
+  type ScopedKV,
+} from './storage';
+import { setBlocked, clearBlocked, isBlocked, logError, logEvent, operatorKey } from './security';
 import type { TgMessage } from './types';
 import type { TenantCfg } from './tenant';
-import { type Locale, T } from './i18n';
+import { type ExposureKind, type Locale, T } from './i18n';
 
-type ReplyCmd = 'block' | 'unblock' | 'checkblock';
+type ReplyCmd = 'block' | 'unblock' | 'checkblock' | 'recall';
 
 export async function handleAdminMessage(
   cfg: TenantCfg,
@@ -48,7 +56,18 @@ export async function handleAdminMessage(
 function asReplyCmd(parsed: { cmd: string; args: string } | null): ReplyCmd | null {
   if (!parsed || parsed.args) return null;
   const { cmd } = parsed;
-  return cmd === 'block' || cmd === 'unblock' || cmd === 'checkblock' ? cmd : null;
+  return cmd === 'block' || cmd === 'unblock' || cmd === 'checkblock' || cmd === 'recall'
+    ? cmd
+    : null;
+}
+
+// Content an admin might send that identifies them to the guest. Delivered anyway (the
+// admin decides), but they get a notice and a /recall handle.
+function exposureKind(m: TgMessage): ExposureKind | null {
+  if (m.contact) return 'contact';
+  if (m.location || m.venue) return 'location';
+  if (m.document || m.audio) return 'file';
+  return null;
 }
 
 const USER_KEY_RE = /^[0-9a-f]{32}$/;
@@ -144,8 +163,13 @@ async function lookupEntry(
   adminChatId: string,
   replyMessageId: number,
 ) {
-  const entry = await getMsgMap(skv, adminChatId, replyMessageId);
-  if (entry || cfg.adminUids.size !== 1) return entry;
+  const adminKey = await operatorKey(adminChatId, cfg.hashSecret);
+  const entry = await getMsgMap(skv, adminKey, replyMessageId);
+  if (entry) return entry;
+  // Entries written before admin ids were hashed in keys still carry the raw UID; they age
+  // out with MSG_MAP_TTL_SEC after the upgrade, then this lookup can go.
+  const rawKeyed = await getMsgMap(skv, adminChatId, replyMessageId);
+  if (rawKeyed || cfg.adminUids.size !== 1) return rawKeyed;
   return getLegacyMsgMap(skv, replyMessageId);
 }
 
@@ -163,6 +187,11 @@ async function handleAdminReply(
       chat_id: message.chat.id,
       text: T.commands.needReply[locale](),
     });
+    return;
+  }
+
+  if (cmd === 'recall') {
+    await handleRecall(cfg, skv, message, reply.message_id, locale);
     return;
   }
 
@@ -207,8 +236,9 @@ async function handleAdminReply(
     return;
   }
 
+  let copied: { message_id: number };
   try {
-    await tg.copyMessage(cfg.botToken, {
+    copied = await tg.copyMessage(cfg.botToken, {
       chat_id: entry.chatId,
       from_chat_id: message.chat.id,
       message_id: message.message_id,
@@ -224,4 +254,53 @@ async function handleAdminReply(
     }
     throw e;
   }
+
+  const kind = exposureKind(message);
+  if (!kind) return;
+  const notice = await tg.sendMessage(cfg.botToken, {
+    chat_id: message.chat.id,
+    text: T.commands.exposureNotice[locale](kind),
+    reply_parameters: { message_id: message.message_id },
+  });
+  // Bookkeeping, fail-open like msg-map: if this write is lost, /recall reports "nothing".
+  try {
+    await putRecall(
+      skv,
+      await operatorKey(message.chat.id, cfg.hashSecret),
+      notice.message_id,
+      { chatId: entry.chatId, messageId: copied.message_id },
+      RECALL_TTL_SEC,
+    );
+  } catch (e) {
+    logError('recall_put', e);
+  }
+}
+
+async function handleRecall(
+  cfg: TenantCfg,
+  skv: ScopedKV,
+  message: TgMessage,
+  noticeMessageId: number,
+  locale: Locale,
+): Promise<void> {
+  const adminKey = await operatorKey(message.chat.id, cfg.hashSecret);
+  const target = await getRecall(skv, adminKey, noticeMessageId);
+  let text: string;
+  if (!target) {
+    text = T.commands.recallNothing[locale]();
+  } else {
+    try {
+      await tg.deleteMessage(cfg.botToken, {
+        chat_id: target.chatId,
+        message_id: target.messageId,
+      });
+      await deleteRecall(skv, adminKey, noticeMessageId);
+      text = T.commands.recalled[locale]();
+    } catch (e) {
+      if (!(e instanceof TelegramError)) throw e;
+      logError('admin_recall', e);
+      text = T.commands.recallFailed[locale](e.detail);
+    }
+  }
+  await tg.sendMessage(cfg.botToken, { chat_id: message.chat.id, text });
 }

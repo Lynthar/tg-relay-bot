@@ -1,9 +1,18 @@
 import { buildApp } from '../src/index';
-import { parseHostConfig, type Env } from '../src/config';
-import { encrypt, getEncKey } from '../src/crypto';
+import { UID_HASH_PURPOSE, parseHostConfig, type Env } from '../src/config';
+import { deriveSecret, encrypt, getEncKey } from '../src/crypto';
 import { MemoryKvStore } from '../src/kv/memory';
-import { createTenant, getStored, putStored, type StoredTenantCfg } from '../src/tenant';
-import type { DisplayMode, TgUpdate } from '../src/types';
+import { operatorKey } from '../src/security';
+import {
+  createTenant,
+  getStored,
+  getStoredEntry,
+  putStored,
+  setAdminUids,
+  type Operators,
+  type StoredTenantCfg,
+} from '../src/tenant';
+import type { DisplayMode, TgMessage, TgUpdate } from '../src/types';
 
 export const MANAGER_BOT_ID = '111111';
 export const MANAGER_TOKEN = '111111:test-manager-token-aaaa';
@@ -102,6 +111,24 @@ export async function provisionLegacyTenant(args: {
   return { botId: args.botId, token, webhookSecret, hashSecret, cfg };
 }
 
+// Operator ids live encrypted in the stored record; tests read and write them through these.
+export async function storedOperators(botId: string): Promise<Operators | null> {
+  const entry = await getStoredEntry(env.nfd, botId, await getEncKey(env.ENV_MASTER_ENC_KEY));
+  return entry ? { ownerUid: entry.ownerUid, adminUids: entry.adminUids } : null;
+}
+
+export async function setTenantAdmins(botId: string, adminUids: string[]): Promise<void> {
+  const cfg = await getStored(env.nfd, botId);
+  if (!cfg) throw new Error(`no tenant ${botId}`);
+  await setAdminUids(cfg, adminUids, await getEncKey(env.ENV_MASTER_ENC_KEY));
+  await putStored(env.nfd, botId, cfg);
+}
+
+// The hashed form of a UID as it appears in manager-level keys (allow-, user-state-).
+export async function hostUidKey(uid: number | string): Promise<string> {
+  return operatorKey(uid, await deriveSecret(env.ENV_MASTER_ENC_KEY, UID_HASH_PURPOSE));
+}
+
 let nextId = 1_000_000;
 export function nid(): number {
   return nextId++;
@@ -116,6 +143,8 @@ export interface UpdateBuilder {
   replyToMessageId?: number;
   mediaGroupId?: string;
   languageCode?: string;
+  // Any further message fields (e.g. { location: {...} }), spread last.
+  extra?: Partial<TgMessage>;
 }
 
 export function buildUpdate(b: UpdateBuilder): TgUpdate {
@@ -141,6 +170,7 @@ export function buildUpdate(b: UpdateBuilder): TgUpdate {
       ...(b.text !== undefined ? { text: b.text } : {}),
       ...(reply ? { reply_to_message: reply } : {}),
       ...(b.mediaGroupId !== undefined ? { media_group_id: b.mediaGroupId } : {}),
+      ...(b.extra ?? {}),
     },
   };
 }

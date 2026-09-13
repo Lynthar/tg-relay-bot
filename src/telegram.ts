@@ -87,9 +87,18 @@ export function sendMessage(
     text: string;
     parse_mode?: 'HTML' | 'Markdown' | 'MarkdownV2';
     disable_web_page_preview?: boolean;
+    reply_parameters?: { message_id: number };
   },
 ): Promise<TgMessage> {
   return call<TgMessage>(token, 'sendMessage', params);
+}
+
+// Bots may only delete their own outgoing messages, and only within 48 hours.
+export function deleteMessage(
+  token: string,
+  params: { chat_id: string | number; message_id: number },
+): Promise<true> {
+  return call<true>(token, 'deleteMessage', params);
 }
 
 export function copyMessage(

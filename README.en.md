@@ -3,35 +3,28 @@
 [![license](https://img.shields.io/github/license/Lynthar/tg-relay-bot)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Lynthar/tg-relay-bot/ci.yml?branch=main&label=CI)](https://github.com/Lynthar/tg-relay-bot/actions/workflows/ci.yml)
 
-Privacy-first, multi-tenant Telegram message relay bot — one codebase, two deploy targets: Cloudflare Worker or Docker
+Multi-tenant Telegram message-relay bot: one codebase, deployable as a Cloudflare Worker or a Docker container
 
 English | [简体中文](README.md)
 
-A stranger messages your bot; the message lands in your own Telegram. You reply
-to that forwarded message and they get an answer — from the bot. Your account
-never appears.
+A visitor messages your bot; the message lands in your own Telegram. You reply
+to that forwarded message and they get the answer — from the bot. Your personal
+account is never shown.
 
-```mermaid
-sequenceDiagram
-    participant V as Visitor
-    participant B as Relay bot
-    participant O as You
-    V->>B: private message
-    B->>O: forwarded; the sender shows only as a userKey
-    O->>B: reply to the forwarded message
-    B->>V: delivered as the bot
-```
-
-My biggest change from upstream is that **one deployment hosts many bots**.
-Yours, plus your friends', fully isolated from each other. Your friends never
-touch the server and never ask you for a key: they message a "manager bot", send
-`/setup`, and paste their own token.
+There are plenty of relay bots like this on Telegram already, but every one I
+tried had some limitation or drawback, so I wrote a light one for myself. My
+biggest change from upstream is that **one deployment hosts many bots**: your
+own several Telegram accounts don't each need a deployment. You can also let
+friends use the system you run (provided they aren't too particular about
+privacy and trust you enough); day to day you are fully isolated from each
+other. Your friends never touch the server and never ask you for a key: they
+message a "manager bot", send `/setup`, and paste their own token.
 
 ## Install
 
-Both deployment targets are fully supported, and CI exercises both. Either way
-you first need a **manager bot** from [@BotFather](https://t.me/BotFather) —
-separate from any relay bot — and your own Telegram UID.
+Either way you first need a **manager bot** from
+[@BotFather](https://t.me/BotFather) — separate from any relay bot — and your
+own Telegram UID.
 
 **Cloudflare Worker** — needs a Cloudflare account and Node 20+:
 
@@ -97,10 +90,12 @@ The host also has `/invite`, `/uninvite`, `/invites`, `/host_list`,
 `/host_disable`, `/host_purge` and `/host_migrate`.
 
 On a relay bot, `/block`, `/unblock` and `/checkblock` only work as a **reply to
-a forwarded message**. Albums, forwards and every media type take the same
-path; visitors are rate-limited to 5 messages per 60s by default (an album
-counting as one), updates are de-duplicated, and each bot can have up to 10
-admins.
+a forwarded message**. Contacts, locations, venues, files and audio files are
+delivered as usual, but the bot answers with a notice; reply `/recall` to that
+notice to delete the copy from the visitor's chat within 48 hours. Albums,
+forwards and every media type take the same path; visitors are rate-limited to
+5 messages per 60s by default (an album counting as one), updates are
+de-duplicated, and each bot can have up to 10 admins.
 
 ## Configuration
 
@@ -123,8 +118,17 @@ Generate keys with `openssl rand -base64 32` and `openssl rand -hex 32`.
 - **Not end-to-end encrypted** — Telegram can't do that, and neither can this.
   The host can decrypt every tenant's token, so **don't run this somewhere you
   don't trust**.
-- **Anonymity protects visitors, not operators.** With `ENV_DEBUG=1`, event logs
-  record owner and admin UIDs. Visitors only ever appear as a userKey.
+- **It protects you first — the person behind the bot; visitors get basic
+  protection.** The visitor always sees the bot as the sender: replies are copied,
+  not forwarded, with no sender header; a mistyped slash command never reaches
+  the visitor; blocked and rate-limited visitors get no feedback. Your UID never
+  appears in the clear in storage or logs (encrypted in the record, hashed in
+  keys and logs) — someone with only a storage dump learns which bots are hosted
+  here, not who runs them.
+- **Out of its hands:** Telegram knows which account created the bot; the hours
+  you reply at give away your schedule; the bot's name, avatar and description
+  are yours to set, so don't reuse your own; what you write in a reply is only
+  checked by you.
 - **`ENV_MASTER_ENC_KEY` is the only root key, and losing it is unrecoverable.**
   Every tenant has to `/setup` again; there's no second line of defence.
 - **Data can't be migrated between the two deployment targets.** Switching means
@@ -134,11 +138,11 @@ Generate keys with `openssl rand -base64 32` and `openssl rand -hex 32`.
 - **No command menu and no buttons** — bot usernames, UIDs and 32-character
   userKeys all have to be typed by hand.
 
-On the storage side: a visitor's chat ID is never stored, only a 16-byte
-truncated `HMAC-SHA256` under a per-tenant key; tenant bot tokens and webhook
-secrets are encrypted at rest with AES-256-GCM; secrets are compared in constant
-time. 174 test cases — the main suite on plain Node, plus five smoke tests
-against real workerd.
+On the storage side: owner and admin UIDs, bot tokens and webhook secrets are
+encrypted at rest with AES-256-GCM, and UIDs inside keys are replaced by an
+`HMAC-SHA256`; a visitor's chat ID is likewise never stored, only a hash under a
+per-tenant key; secrets are compared in constant time. 199 test cases — the main
+suite on plain Node, plus five smoke tests against real workerd.
 
 ## Differences from upstream
 

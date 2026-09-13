@@ -3,7 +3,7 @@
 [![license](https://img.shields.io/github/license/Lynthar/tg-relay-bot)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Lynthar/tg-relay-bot/ci.yml?branch=main&label=CI)](https://github.com/Lynthar/tg-relay-bot/actions/workflows/ci.yml)
 
-多租户 Telegram 消息转发 bot：同一套代码，可用Cloudflare Worker 或 Docker 容器部署。
+多租户 Telegram 消息转发 bot：同一套代码，可用 Cloudflare Worker 或 Docker 容器部署
 
 简体中文 | [English](README.en.md)
 
@@ -77,8 +77,9 @@ host 另有 `/invite` `/uninvite` `/invites` `/host_list` `/host_disable`
 `/host_purge` `/host_migrate`。
 
 在中继 bot 那边，`/block` `/unblock` `/checkblock` 必须**回复某条转发消息**才生效。
-相册、转发、各类媒体走同一套处理逻辑；访客限速默认 60 秒 5 条（相册整组算一条），
-update 去重，每 bot 最多 10 个管理员。
+名片、位置、地点、文件和音频文件照常送达，但 bot 会回一条提醒，回复那条提醒发 `/recall`
+可在 48 小时内从访客那里删掉。相册、转发、各类媒体走同一套处理逻辑；访客限速默认
+60 秒 5 条（相册整组算一条），update 去重，每 bot 最多 10 个管理员。
 
 ## 配置
 
@@ -100,17 +101,21 @@ Worker 侧用 `wrangler secret put` 加 `wrangler.toml` 的 `[vars]`；Docker �
 
 - **不是端到端加密**，Telegram 本身就做不到。host 手上有解开所有租户 token 的能力——
   这套东西**不适合放在你不信任的人那里托管**。
-- **匿名保护的对象是访客，不是运营者。** 开 `ENV_DEBUG=1` 时事件日志会记 owner 和
-  管理员的 UID；访客永远只以 userKey 出现。
+- **保护的对象首先是你，bot 后面的人；访客只做基础保护。** 访客看到的发信人始终是
+  bot：回复用 copy 不用转发，没有发信人头；拼错的斜杠命令不会漏给访客；被拉黑或超限
+  的访客得不到任何提示。存储和日志里不出现你的 UID 明文（记录里是加密值，键和日志里
+  是哈希）——单独拿到存储 dump 的人知道这里托管了哪些 bot，不知道谁在运营。
+- **管不到的部分：** Telegram 知道是哪个账号建的 bot；回复时段会透露作息；bot 的名字、
+  头像、简介是你自己设的，别复用本人的；回复里写了什么只有你自己把关。
 - **`ENV_MASTER_ENC_KEY` 是唯一的根密钥，丢了无法恢复**：所有租户得重新 `/setup`，
   没有第二道灾备。
 - **两种部署方式之间不能迁移数据。** 换一种等于每个人重新配置一次，黑名单会丢。
 - **只处理私聊消息。** 群组、频道、消息编辑、按钮回调一概不处理。
 - **没有命令菜单也没有按钮**，bot 用户名、UID、32 位 userKey 都要手动输入。
 
-存储侧：访客的 chatId 不落库，落的是每租户独立密钥算出来的 `HMAC-SHA256` 截断 16 字节；
-租户的 bot token 与 webhook secret 用 AES-256-GCM 静态加密；密钥比较走常数时间。
-174 个测试用例，主套件跑纯 Node，另有 5 个冒烟跑真 workerd。
+存储侧：owner 与管理员的 UID、bot token、webhook secret 用 AES-256-GCM 静态加密，键里的
+UID 一律换成 `HMAC-SHA256`；访客的 chatId 同样不落库，落的是每租户独立密钥算出来的
+哈希；密钥比较走常数时间。199 个测试用例，主套件跑纯 Node，另有 5 个冒烟跑真 workerd。
 
 ## 与上游的区别
 

@@ -41,6 +41,27 @@ export async function decrypt(b64: string, key: CryptoKey): Promise<string> {
   return dec.decode(pt);
 }
 
+// Deterministic secondary secret derived from the master key (HKDF-SHA256, no salt, the
+// purpose string as info). Used as the HMAC secret for host-level ids so the master key
+// itself never doubles as a MAC key.
+const derivedCache = new Map<string, string>();
+export async function deriveSecret(masterKeyB64: string, purpose: string): Promise<string> {
+  const cacheKey = `${purpose}\n${masterKeyB64}`;
+  const cached = derivedCache.get(cacheKey);
+  if (cached) return cached;
+  const ikm = await crypto.subtle.importKey('raw', base64ToBytes(masterKeyB64), 'HKDF', false, [
+    'deriveBits',
+  ]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode(purpose) },
+    ikm,
+    256,
+  );
+  const hex = [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  derivedCache.set(cacheKey, hex);
+  return hex;
+}
+
 export function randomHex(byteLen: number): string {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLen));
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');

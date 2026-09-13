@@ -10,8 +10,10 @@ import {
   provisionLegacyTenant,
   provisionTenant,
   tgMock,
+  setTenantAdmins,
 } from '../helpers';
-import { userKey } from '../../src/security';
+import { operatorKey, userKey } from '../../src/security';
+import type { TgMessage } from '../../src/types';
 import { ScopedKV } from '../../src/storage';
 import { getStored, putStored } from '../../src/tenant';
 import { decrypt, getEncKey } from '../../src/crypto';
@@ -57,7 +59,31 @@ describe('relay happy-path (sanity)', () => {
 
     expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(1);
     const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
-    expect((await skv.list('msg-map-')).keys.length).toBe(1);
+    const keys = (await skv.list('msg-map-')).keys.map((k) => k.name);
+    expect(keys.length).toBe(1);
+    // The admin dimension of the key is the hashed UID; the UID itself never lands in a key.
+    expect(keys[0]).toContain(await operatorKey('owner-200000', t.hashSecret));
+    expect(keys[0]).not.toContain('owner-200000');
+  });
+
+  it('a msg-map entry keyed by the raw admin UID (pre-hash format) still routes the reply', async () => {
+    const adminUid = 200007;
+    const t = await provisionTenant({ botId: '200007', ownerUid: String(adminUid) });
+    const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
+    const guestChat = 9997;
+    await skv.put(
+      `msg-map-${adminUid}-4242`,
+      JSON.stringify({ chatId: guestChat, userKey: 'uk-old', createdAt: Date.now() }),
+    );
+    await postWebhook(
+      t.botId,
+      t.webhookSecret,
+      buildUpdate({ chatId: adminUid, fromId: adminUid, text: 'still works', replyToMessageId: 4242 }),
+    );
+    await flush();
+    const copies = tgMock.getCallsByMethod('copyMessage');
+    expect(copies.length).toBe(1);
+    expect(copies[0]?.body?.chat_id).toBe(guestChat);
   });
 });
 
@@ -114,7 +140,7 @@ describe('admin reply happy-path (sanity)', () => {
     const guestChat = 9999;
     const guestUk = await userKey(guestChat, t.hashSecret);
     await skv.put(
-      `msg-map-${adminUid}-7777`,
+      `msg-map-${await operatorKey(adminUid, t.hashSecret)}-7777`,
       JSON.stringify({ chatId: guestChat, userKey: guestUk, createdAt: Date.now() }),
     );
 
@@ -465,7 +491,7 @@ describe('/blocklist and /unblock <userKey> (no-reply block management)', () => 
     const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
     await skv.put(`block-${UK_A}`, '1');
     await skv.put(
-      `msg-map-${adminUid}-6001`,
+      `msg-map-${await operatorKey(adminUid, t.hashSecret)}-6001`,
       JSON.stringify({ chatId: 59999, userKey: UK_A, createdAt: Date.now() }),
     );
 
@@ -505,8 +531,7 @@ describe('multi-admin msg-map routing (regression: message_id is only per-chat u
     const guestX = 51111;
     const guestY = 52222;
     const t = await provisionTenant({ botId: '500000', ownerUid: String(adminA) });
-    t.cfg.adminUids = [String(adminA), String(adminB)];
-    await putStored(env.nfd, t.botId, t.cfg);
+    await setTenantAdmins(t.botId, [String(adminA), String(adminB)]);
 
     // Telegram assigns message_ids per chat; simulate both admins' counters passing 500:
     //   guest X → A: 500   guest X → B: 600   guest Y → A: 501   guest Y → B: 500
@@ -570,8 +595,7 @@ describe('multi-admin msg-map routing (regression: message_id is only per-chat u
   it('multi-admin tenant: ambiguous legacy entry is ignored → no-mapping notice', async () => {
     const adminA = 500021;
     const t = await provisionTenant({ botId: '500020', ownerUid: String(adminA) });
-    t.cfg.adminUids = [String(adminA), '500022'];
-    await putStored(env.nfd, t.botId, t.cfg);
+    await setTenantAdmins(t.botId, [String(adminA), '500022']);
     const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
     await skv.put(
       'msg-map-9999',
@@ -704,17 +728,28 @@ async function provisionWithMapping(botId: string, adminUid: number) {
   const guestChat = 48000 + adminUid;
   const uk = await userKey(guestChat, t.hashSecret);
   await skv.put(
-    `msg-map-${adminUid}-5005`,
+    `msg-map-${await operatorKey(adminUid, t.hashSecret)}-5005`,
     JSON.stringify({ chatId: guestChat, userKey: uk, createdAt: Date.now() }),
   );
   return { t, skv, uk };
 }
 
-async function replyAs(t: { botId: string; webhookSecret: string }, adminUid: number, text: string) {
+async function replyAs(
+  t: { botId: string; webhookSecret: string },
+  adminUid: number,
+  text: string,
+  opts: { replyToMessageId?: number; extra?: Partial<TgMessage> } = {},
+) {
   await postWebhook(
     t.botId,
     t.webhookSecret,
-    buildUpdate({ chatId: adminUid, fromId: adminUid, text, replyToMessageId: 5005 }),
+    buildUpdate({
+      chatId: adminUid,
+      fromId: adminUid,
+      ...(text ? { text } : {}),
+      replyToMessageId: opts.replyToMessageId ?? 5005,
+      ...(opts.extra ? { extra: opts.extra } : {}),
+    }),
   );
   await flush();
 }
@@ -812,6 +847,95 @@ describe('admin block commands report a storage failure instead of going silent'
     await replyAs(t, adminUid, '/block');
     expect(await skv.getString(`block-${uk}`)).toBe('1');
     expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已屏蔽/);
+  });
+});
+
+describe('admin replies that can identify the admin: delivered, noticed, recallable', () => {
+  // Deterministic ids: the copy to the guest gets 777, the notice to the admin gets 888.
+  function respondWithIds() {
+    tgMock.setResponder((call) => {
+      const id = call.url.endsWith('/copyMessage') ? 777 : 888;
+      return Response.json({ ok: true, result: { message_id: id } });
+    });
+  }
+
+  it('a location reply is copied, then the admin gets a notice pointing at /recall', async () => {
+    const adminUid = 230001;
+    const { t, skv } = await provisionWithMapping('230001', adminUid);
+    respondWithIds();
+    await replyAs(t, adminUid, '', { extra: { location: { latitude: 1, longitude: 2 } } });
+
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(1);
+    const notices = tgMock.getCallsByMethod('sendMessage');
+    expect(notices.length).toBe(1);
+    expect(String(notices[0]?.body?.text)).toMatch(/已送达.*位置.*\/recall/);
+    expect(notices[0]?.body?.reply_parameters).toBeDefined();
+    const stored = await skv.getJson<{ chatId: number; messageId: number }>(
+      `recall-${await operatorKey(adminUid, t.hashSecret)}-888`,
+    );
+    expect(stored).toEqual({ chatId: 48000 + adminUid, messageId: 777 });
+  });
+
+  it.each([
+    ['contact', { contact: { phone_number: '+1', first_name: 'x' } }, /名片/],
+    ['venue', { venue: { title: 'x' } }, /位置/],
+    ['document', { document: { file_id: 'x' } }, /元数据/],
+    ['audio', { audio: { file_id: 'x' } }, /元数据/],
+  ] as const)('%s replies get the matching notice', async (_kind, extra, re) => {
+    const adminUid = 230010 + ['contact', 'venue', 'document', 'audio'].indexOf(_kind);
+    const { t } = await provisionWithMapping(String(adminUid), adminUid);
+    await replyAs(t, adminUid, '', { extra });
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(re);
+  });
+
+  it('a plain text reply is copied with no notice and no recall pointer', async () => {
+    const adminUid = 230002;
+    const { t, skv } = await provisionWithMapping('230002', adminUid);
+    await replyAs(t, adminUid, 'hello');
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(1);
+    expect(tgMock.getCallsByMethod('sendMessage').length).toBe(0);
+    expect((await skv.list('recall-')).keys.length).toBe(0);
+  });
+
+  it('/recall replied to the notice deletes the copy from the guest chat and drops the pointer', async () => {
+    const adminUid = 230003;
+    const { t, skv } = await provisionWithMapping('230003', adminUid);
+    respondWithIds();
+    await replyAs(t, adminUid, '', { extra: { document: { file_id: 'x' } } });
+    tgMock.reset();
+
+    await replyAs(t, adminUid, '/recall', { replyToMessageId: 888 });
+    const del = tgMock.getCallsByMethod('deleteMessage');
+    expect(del.length).toBe(1);
+    expect(del[0]?.body).toEqual({ chat_id: 48000 + adminUid, message_id: 777 });
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已从对方那里撤回/);
+    expect(await skv.getJson(`recall-${await operatorKey(adminUid, t.hashSecret)}-888`)).toBeNull();
+  });
+
+  it('/recall on a message that is not a notice reports nothing to recall', async () => {
+    const adminUid = 230004;
+    const { t } = await provisionWithMapping('230004', adminUid);
+    await replyAs(t, adminUid, '/recall');
+    expect(tgMock.getCallsByMethod('deleteMessage').length).toBe(0);
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/没有可撤回/);
+  });
+
+  it('/recall reports the Telegram error when the copy can no longer be deleted', async () => {
+    const adminUid = 230005;
+    const { t, skv } = await provisionWithMapping('230005', adminUid);
+    respondWithIds();
+    await replyAs(t, adminUid, '', { extra: { contact: { phone_number: '+1', first_name: 'x' } } });
+    tgMock.reset();
+    tgMock.setResponder((call) =>
+      call.url.endsWith('/deleteMessage')
+        ? Response.json({ ok: false, error_code: 400, description: "Bad Request: message can't be deleted" })
+        : Response.json({ ok: true, result: { message_id: 1 } }),
+    );
+
+    await replyAs(t, adminUid, '/recall', { replyToMessageId: 888 });
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/撤回失败/);
+    // The pointer stays so the admin can retry if it was a transient failure.
+    expect(await skv.getJson(`recall-${await operatorKey(adminUid, t.hashSecret)}-888`)).not.toBeNull();
   });
 });
 

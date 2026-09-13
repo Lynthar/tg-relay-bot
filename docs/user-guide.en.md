@@ -39,7 +39,8 @@ Each user can onboard up to 3 bots (the host is exempt).
 
 - Anyone who messages `@your_bot` → you receive a **native Telegram forwarded message** in your chat with the bot (blue "Forwarded from <name>" header, sender's profile clickable)
 - Reply directly to that forwarded message → the reply goes back to the original sender (sender sees the bot, not you)
-- Your reply is sent via copyMessage, **never revealing your real identity**
+- Your reply is sent via copyMessage: no forward header, no sender
+- Contacts, locations, venues, content sent as a file and audio files are delivered as usual, but the bot answers you with a notice — they hand over contact details or a position, or carry file metadata (EXIF, author fields, ID3). Reply `/recall` to that notice and the copy is deleted from the guest's chat, within 48 hours
 
 ### Block / unblock
 
@@ -51,6 +52,7 @@ In the chat with **your own bot** (not the manager bot):
 | Reply to a forwarded message with `/block` | Block that guest |
 | Reply to a forwarded message with `/unblock` | Unblock |
 | Reply to a forwarded message with `/checkblock` | Show whether blocked |
+| Reply to a "Delivered" notice with `/recall` | Delete that reply from the guest's chat (within 48 hours) |
 | Send `/blocklist` | List blocked guests' userKeys |
 | Send `/unblock <userKey>` | Unblock by userKey (no reply needed) |
 | Send `/status` | Show that bot's stats (msg-map / blocked / rate-limit counts) |
@@ -256,7 +258,7 @@ Host only:
 
 | Command | Purpose |
 |---|---|
-| `/host_migrate` | Run once after upgrading from an older version: encrypts legacy plaintext secrets and refreshes webhooks; idempotent |
+| `/host_migrate` | Run once after upgrading from an older version: encrypts legacy plaintext secrets and operator UIDs, re-keys the invite list to hashes, refreshes webhooks; idempotent |
 | `/invite <uid>` | Allow a user to `/setup` (they can find their UID via `/whoami`) |
 | `/uninvite <uid>` | Revoke an invite (existing bots unaffected; use `/host_purge` if needed) |
 | `/invites` | List invited users |
@@ -288,9 +290,12 @@ For admins only (the owner plus anyone they added via `/admins`):
 | Reply with `/block` | Block that guest |
 | Reply with `/unblock` | Unblock |
 | Reply with `/checkblock` | Show block status |
+| Reply to a "Delivered" notice with `/recall` | Delete the corresponding reply from the guest's chat; Telegram only lets a bot delete its own messages within 48 hours |
 | Send `/blocklist` | List blocked guests' userKeys |
 | Send `/unblock <userKey>` | Unblock by userKey (for when the original forward has expired) |
 | Send `/status` | Show stats (msg-map / blocked / rate-limit windows counts) |
+
+Contacts, locations, venues, files (document) and audio files (audio) in an admin's reply are delivered as usual; afterwards the bot sends a notice saying what that content gives away and offers `/recall`. Photos, videos, voice notes and stickers get no notice — Telegram re-encodes them and they carry no original metadata.
 
 Non-admin users sending `/block` etc. → not effective; the message is treated as a normal forward to admin. Admin-sent text starting with `/` that is not one of the commands above (e.g. a typo like `/blck`) is intercepted with a notice and never sent to the guest.
 
@@ -308,7 +313,7 @@ Each tenant bot configures this independently; default is `native`. Change via `
 |---|---|---|
 | `native` | Native Telegram forward UI ("Forwarded from <name>" header, profile clickable) | Most cases; most direct |
 | `tag` | Rich HTML tag (`↘ <name> · @handle · id:xxx`, with tg://user clickable link) + copyMessage (no forward metadata) | When you want sender identity but don't want the bot to look like it's "forwarding" |
-| `hex` | Opaque hash tag (`↘ a3f9c1b8...`) + copyMessage | Maximum privacy; even admin only sees an anonymous hash |
+| `hex` | Opaque hash tag (`↘ a3f9c1b8...`) + copyMessage | Strictest for the guest: even the admin only sees an anonymous hash |
 
 ---
 
@@ -404,8 +409,8 @@ No need to re-register webhooks, reconfigure secrets, or migrate data.
 
 1. Old Worker-only version: after `git pull`, add `[vars] ENV_PUBLIC_BASE_URL = "https://<your worker>.workers.dev"` to `wrangler.toml` (newly required), then `npx wrangler deploy`
 2. `tg-relay-bot-docker` fork: point the git remote at this repo and `git pull`; `.env` needs no new fields — just `docker compose build --pull && docker compose up -d`
-3. On both tracks: re-run `curl 'https://.../admin/registerWebhook?s=<ENV_ADMIN_SECRET>'`, then run `/host_migrate` in the manager bot — it encrypts existing tenants' plaintext secrets and applies `allowed_updates` to every tenant webhook. Both steps are idempotent
-4. In multi-admin tenants, reply routing for forwards stored before the migration uses the old key format: replying to an occasional old message may report no target; those records age out within the 30-day TTL and need no action
+3. On both tracks: re-run `curl 'https://.../admin/registerWebhook?s=<ENV_ADMIN_SECRET>'`, then run `/host_migrate` in the manager bot — it encrypts existing tenants' plaintext secrets and operator UIDs, re-keys the invite list to hashes, and applies `allowed_updates` to every tenant webhook. Both steps are idempotent
+4. Reply-routing records written before the upgrade keep their old keys and still route replies afterwards; they age out within the 30-day TTL and need no action. A `/setup` that was mid-conversation loses its state — just send `/setup` again
 
 ### Full uninstall
 
@@ -453,8 +458,13 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 
 ### What we guarantee
 
-- Guest chatIds are stored as HMAC-SHA256 hashes (`userKey`); a storage dump reveals no chatId plaintext (the one exception is the reply-routing msg-map, which expires after 30 days)
-- Every tenant's token, webhook secret, and hashSecret are AES-GCM encrypted at rest — a storage dump alone (without `ENV_MASTER_ENC_KEY`) cannot brute-force userKeys offline (deployments upgraded from older versions must run `/host_migrate` once)
+The operator — the person behind the bot — is protected first; guests get basic protection.
+
+- The guest always sees the bot as the sender: replies go out via copyMessage with no forward header and no sender; an admin's unrecognised slash command is intercepted and never reaches the guest; blocked and rate-limited guests get no feedback at all, so there is no channel to probe
+- Content that would identify the operator — contacts, locations, venues, files with metadata — is delivered but flagged, and can be `/recall`ed within 48 hours
+- Storage holds no operator identity: owner and admin UIDs are stored AES-GCM encrypted, and the msg-map, album-tag, recall, invite-list and onboarding-state keys carry an HMAC of the UID rather than the UID; `ENV_DEBUG=1` event logs record the same hashes. Someone with only a storage dump or a log learns which bots this deployment hosts, not who runs them (deployments upgraded from older versions must run `/host_migrate` once)
+- Guest chatIds are stored as HMAC-SHA256 hashes (`userKey`); a storage dump reveals no chatId plaintext (the exceptions are the reply-routing msg-map and the recall pointers, which expire after 30 days and 48 hours)
+- Every tenant's token, webhook secret, and hashSecret are AES-GCM encrypted at rest — a storage dump alone (without `ENV_MASTER_ENC_KEY`) cannot brute-force userKeys offline
 - Webhook auth relies on a per-tenant random `secret_token` header (constant-time compared, thwarting side channels), not path secrecy — the botId in the path is public information; a missing or wrong secret gets a uniform 404, unusable for probing whether a bot is hosted here
 - Telegram's webhook retries are deduplicated by `update_id`
 - Per-guest rate limit: max 5 messages per 60s; excess silently dropped
@@ -472,9 +482,11 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 | Reverse proxy / TLS terminator (Docker track) | ✅ technically possible | TLS terminates at the proxy; cleartext is forwarded inside the local network. If the proxy is someone else's (Cloudflare Tunnel etc.), they can see it too |
 | Host (the deployer) | ✅ | Logs + storage hold every tenant's token; inherent cost of multi-tenant hosting |
 | Anyone with a leaked bot token | ✅ | Token = full access; switching the webhook intercepts all messages |
-| Anyone with a storage dump + `ENV_MASTER_ENC_KEY` | ✅ | Together they decrypt every tenant token |
+| Anyone with a storage dump + `ENV_MASTER_ENC_KEY` | ✅ | Together they decrypt every tenant token, and reveal who runs which bot |
 | ISPs / on-path observers | ❌ metadata only | TLS encrypted |
 | Other Telegram users | ❌ | Private chats are 1-to-1 |
+
+A few things about the operator's identity are out of this project's hands: Telegram knows which account created the bot in BotFather; the hours you reply at give away your schedule; the bot's name, avatar and description are yours to set — don't reuse your own; and what you write in a reply is only checked by you.
 
 ### Trust model
 
@@ -494,14 +506,15 @@ Both storage backends share the same key layout. Cloudflare KV expires keys nati
 | Data | Retention |
 |---|---|
 | `tenant:{botId}:cfg` (encrypted token & secrets) | Until `/delete --yes` |
-| `tenant:{botId}:msg-map-{adminUid}-{id}` | TTL 30 days |
+| `tenant:{botId}:msg-map-{adminKey}-{id}` (`adminKey` is an HMAC of the admin's UID) | TTL 30 days |
+| `tenant:{botId}:recall-{adminKey}-{id}` (recall pointer) | TTL 48 hours |
 | `tenant:{botId}:block-{userKey}` | Until `/unblock` |
 | `tenant:{botId}:rate-{userKey}` | TTL 60 seconds |
 | `tenant:{botId}:update-{id}` | TTL 5 minutes |
 | `tenant:{botId}:mg-*` / `album-*` (album tag & rate-unit dedup markers) | TTL 60 seconds |
-| `manager:user-state-{uid}` | TTL 1 hour after inactivity |
+| `manager:user-state-{hash}` (`hash` is an HMAC of the UID) | TTL 1 hour after inactivity |
 | `manager:dedup-update-{id}` | TTL 5 minutes |
-| `manager:allow-{uid}` (invite list) | Until `/uninvite` |
+| `manager:allow-{hash}` (invite list; the value is the UID, encrypted) | Until `/uninvite` |
 
 ---
 
