@@ -2,7 +2,7 @@ import { buildApp } from '../src/index';
 import { parseHostConfig, type Env } from '../src/config';
 import { encrypt, getEncKey } from '../src/crypto';
 import { MemoryKvStore } from '../src/kv/memory';
-import { createTenant, putStored, type StoredTenantCfg } from '../src/tenant';
+import { createTenant, getStored, putStored, type StoredTenantCfg } from '../src/tenant';
 import type { DisplayMode, TgUpdate } from '../src/types';
 
 export const MANAGER_BOT_ID = '111111';
@@ -44,12 +44,21 @@ export interface ProvisionedTenant {
   cfg: StoredTenantCfg;
 }
 
+// The shared store is never reset, so a reused botId would silently overwrite an
+// earlier test's tenant (new hashSecret, stale msg-map keys). Enforce the invariant.
+async function assertFreshBotId(botId: string): Promise<void> {
+  if (await getStored(env.nfd, botId)) {
+    throw new Error(`test botId ${botId} already provisioned in this worker; pick a unique one`);
+  }
+}
+
 export async function provisionTenant(args: {
   botId: string;
   ownerUid: string;
   botUsername?: string;
   displayMode?: DisplayMode;
 }): Promise<ProvisionedTenant> {
+  await assertFreshBotId(args.botId);
   const token = `${args.botId}:test-token-${args.botId}`;
   const encKey = await getEncKey(env.ENV_MASTER_ENC_KEY);
   const { cfg, webhookSecret, hashSecret } = await createTenant(env.nfd, encKey, {
@@ -72,6 +81,7 @@ export async function provisionLegacyTenant(args: {
   ownerUid: string;
   botUsername?: string;
 }): Promise<ProvisionedTenant> {
+  await assertFreshBotId(args.botId);
   const token = `${args.botId}:test-token-${args.botId}`;
   const encKey = await getEncKey(env.ENV_MASTER_ENC_KEY);
   const webhookSecret = `legacy-webhook-${args.botId}`;

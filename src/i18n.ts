@@ -1,14 +1,10 @@
-import type { TgMessage, TgUser } from './types';
+import type { TgMessage } from './types';
 
 export type Locale = 'zh' | 'en';
 
 export function pickLocale(code?: string): Locale {
   if (!code) return 'zh';
   return code.toLowerCase().startsWith('zh') ? 'zh' : 'en';
-}
-
-export function localeFromUser(u?: TgUser): Locale {
-  return pickLocale(u?.language_code);
 }
 
 export function localeFromMessage(m: TgMessage): Locale {
@@ -521,6 +517,10 @@ export const T = {
     replyFailed: bil(
       (detail: string) => `回复发送失败：${detail}`,
       (detail: string) => `Reply send failed: ${detail}`,
+    ),
+    blockOpFailed: bil(
+      () => '操作未生效（存储访问失败），请稍后重试。',
+      () => 'The operation did not take effect (storage access failed); please retry later.',
     ),
   },
 };

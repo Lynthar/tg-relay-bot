@@ -176,27 +176,26 @@ async function handleAdminReply(
       });
       return;
     }
-    if (cmd === 'block') {
-      await setBlocked(skv, entry.userKey);
-      logEvent(debug, 'block_set', { uk: entry.userKey });
-      await tg.sendMessage(cfg.botToken, {
-        chat_id: message.chat.id,
-        text: T.commands.blocked[locale](entry.userKey),
-      });
-    } else if (cmd === 'unblock') {
-      await clearBlocked(skv, entry.userKey);
-      logEvent(debug, 'block_clear', { uk: entry.userKey });
-      await tg.sendMessage(cfg.botToken, {
-        chat_id: message.chat.id,
-        text: T.commands.unblocked[locale](entry.userKey),
-      });
-    } else {
-      const blocked = await isBlocked(skv, entry.userKey);
-      await tg.sendMessage(cfg.botToken, {
-        chat_id: message.chat.id,
-        text: T.commands.checkBlock[locale](entry.userKey, blocked),
-      });
+    // Blocklist access is fail-loud, but the admin only ever sees the reply: a storage
+    // failure must reach them as "did not take effect", not as silence.
+    let text: string;
+    try {
+      if (cmd === 'block') {
+        await setBlocked(skv, entry.userKey);
+        logEvent(debug, 'block_set', { uk: entry.userKey });
+        text = T.commands.blocked[locale](entry.userKey);
+      } else if (cmd === 'unblock') {
+        await clearBlocked(skv, entry.userKey);
+        logEvent(debug, 'block_clear', { uk: entry.userKey });
+        text = T.commands.unblocked[locale](entry.userKey);
+      } else {
+        text = T.commands.checkBlock[locale](entry.userKey, await isBlocked(skv, entry.userKey));
+      }
+    } catch (e) {
+      logError(`admin_${cmd}`, e);
+      text = T.commands.blockOpFailed[locale]();
     }
+    await tg.sendMessage(cfg.botToken, { chat_id: message.chat.id, text });
     return;
   }
 

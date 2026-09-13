@@ -140,8 +140,8 @@ describe('/start_message', () => {
   });
 
   it('rejects missing body (usage prompt)', async () => {
-    const t = await provisionTenant({ botId: '400012', ownerUid: '400012' });
-    await sendManagerCmd(400012, `/start_message ${t.cfg.botUsername}`);
+    const t = await provisionTenant({ botId: '400008', ownerUid: '400008' });
+    await sendManagerCmd(400008, `/start_message ${t.cfg.botUsername}`);
     await flush();
     expect(lastReplyText()).toMatch(/用法/);
   });

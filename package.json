@@ -23,7 +23,7 @@
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260821.1",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^20.19.41",
+    "@types/node": "^24.13.4",
     "typescript": "^5.7.0",
     "vitest": "^4.1.6",
     "wrangler": "^4.125.0"

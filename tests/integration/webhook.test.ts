@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MANAGER_BOT_ID,
   buildUpdate,
@@ -698,28 +698,28 @@ describe('media group counts as one rate unit (album admission)', () => {
   });
 });
 
+async function provisionWithMapping(botId: string, adminUid: number) {
+  const t = await provisionTenant({ botId, ownerUid: String(adminUid) });
+  const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
+  const guestChat = 48000 + adminUid;
+  const uk = await userKey(guestChat, t.hashSecret);
+  await skv.put(
+    `msg-map-${adminUid}-5005`,
+    JSON.stringify({ chatId: guestChat, userKey: uk, createdAt: Date.now() }),
+  );
+  return { t, skv, uk };
+}
+
+async function replyAs(t: { botId: string; webhookSecret: string }, adminUid: number, text: string) {
+  await postWebhook(
+    t.botId,
+    t.webhookSecret,
+    buildUpdate({ chatId: adminUid, fromId: adminUid, text, replyToMessageId: 5005 }),
+  );
+  await flush();
+}
+
 describe('mistyped admin commands never leak to the guest', () => {
-  async function provisionWithMapping(botId: string, adminUid: number) {
-    const t = await provisionTenant({ botId, ownerUid: String(adminUid) });
-    const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
-    const guestChat = 48000 + adminUid;
-    const uk = await userKey(guestChat, t.hashSecret);
-    await skv.put(
-      `msg-map-${adminUid}-5005`,
-      JSON.stringify({ chatId: guestChat, userKey: uk, createdAt: Date.now() }),
-    );
-    return { t, skv, uk };
-  }
-
-  async function replyAs(t: { botId: string; webhookSecret: string }, adminUid: number, text: string) {
-    await postWebhook(
-      t.botId,
-      t.webhookSecret,
-      buildUpdate({ chatId: adminUid, fromId: adminUid, text, replyToMessageId: 5005 }),
-    );
-    await flush();
-  }
-
   it('/block@own_bot and /Block execute as /block', async () => {
     const adminUid = 220001;
     const { t, skv, uk } = await provisionWithMapping('220001', adminUid);
@@ -780,9 +780,44 @@ describe('mistyped admin commands never leak to the guest', () => {
   });
 });
 
+describe('admin block commands report a storage failure instead of going silent', () => {
+  it('/block whose blocklist write fails replies "did not take effect" and writes nothing', async () => {
+    const adminUid = 220010;
+    const { t, skv, uk } = await provisionWithMapping('220010', adminUid);
+    // Only the blocklist write fails; the fail-open bookkeeping puts before it stay healthy.
+    const realPut = env.nfd.put.bind(env.nfd);
+    const put = vi.spyOn(env.nfd, 'put').mockImplementation(async (key, value, options) => {
+      if (key.includes(':block-')) throw new Error('kv unavailable');
+      return realPut(key, value, options);
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let logged = '';
+    try {
+      await replyAs(t, adminUid, '/block');
+      logged = err.mock.calls.map((c) => String(c[0])).join('\n');
+    } finally {
+      put.mockRestore();
+      err.mockRestore();
+    }
+    expect(await skv.getString(`block-${uk}`)).toBeNull();
+    const replies = tgMock.getCallsByMethod('sendMessage');
+    expect(replies.length).toBe(1);
+    expect(String(replies[0]?.body?.text)).toMatch(/操作未生效/);
+    expect(logged).toMatch(/event=admin_block/);
+  });
+
+  it('/block whose write succeeds still confirms as before', async () => {
+    const adminUid = 220011;
+    const { t, skv, uk } = await provisionWithMapping('220011', adminUid);
+    await replyAs(t, adminUid, '/block');
+    expect(await skv.getString(`block-${uk}`)).toBe('1');
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已屏蔽/);
+  });
+});
+
 describe('non-admin /block is treated as ordinary text', () => {
   it('no block-* key is written; the message is relayed as text', async () => {
-    const t = await provisionTenant({ botId: '200006', ownerUid: '700001' });
+    const t = await provisionTenant({ botId: '200003', ownerUid: '700001' });
     const nonAdmin = 5556;
 
     const r = await postWebhook(

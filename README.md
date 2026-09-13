@@ -3,31 +3,19 @@
 [![license](https://img.shields.io/github/license/Lynthar/tg-relay-bot)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Lynthar/tg-relay-bot/ci.yml?branch=main&label=CI)](https://github.com/Lynthar/tg-relay-bot/actions/workflows/ci.yml)
 
-注重隐私的多租户 Telegram 消息中继 bot：一套代码，可部署为 Cloudflare Worker 或 Docker 容器
+多租户 Telegram 消息转发 bot：同一套代码，可用Cloudflare Worker 或 Docker 容器部署。
 
 简体中文 | [English](README.en.md)
 
-陌生人给你的 bot 发私聊，消息转到你自己的 Telegram 里；你直接回复那条转发，对方就收到
-了——发信人显示成 bot，你的账号自始至终没露出去。
+访客给你的 bot 消息，消息转发到你自己的 Telegram 里；你直接回复那条转发，对方就收到
+了——发信人显示成 bot，你的个人账号不会被看到。
 
-```mermaid
-sequenceDiagram
-    participant V as 访客
-    participant B as 中继 bot
-    participant O as 你
-    V->>B: 私聊消息
-    B->>O: 转发；发信人只显示为一段 userKey
-    O->>B: 回复那条转发
-    B->>V: 以 bot 的身份送达
-```
-
-我在上游基础上改动最大的一处，是**让一次部署能托管很多个 bot**。你自己的，加上你邀请
-的朋友的，彼此完全隔离。朋友不用碰服务器，也不用找你要什么密钥：在一个「管家 bot」
-里发 `/setup`，把自己的 token 贴进去就可以了。
+其实tg上这类消息转发bot已经很多了，但其他的我尝试过后总有这样那样的限制或缺点，因此自己写了一个轻量的用。我在上游基础上改动最大的一处，是**让一次部署能托管很多个 bot**。你自己的多个tg号不必每个都部署一次。
+你也可以邀请你的朋友使用你部署的这套bot系统（前提是他不太注重隐私需求，且足够信任你），平时你们彼此完全隔离。朋友不用碰服务器，也不用找你要什么密钥：在一个「管家 bot」里发 `/setup`，把自己的 token 贴进去就可以了。
 
 ## 安装
 
-两种部署方式都完整支持，CI 里两种都跑。共同的前置是找 [@BotFather](https://t.me/BotFather)
+两种部署方式的共同的前置是找 [@BotFather](https://t.me/BotFather)
 建一个**管家 bot**（跟中继 bot 分开），以及知道自己的 Telegram UID。
 
 **Cloudflare Worker**——需要 Cloudflare 账号和 Node 20+：
@@ -68,7 +56,7 @@ curl "https://<你的域名>/admin/registerWebhook?s=<ENV_ADMIN_SECRET>"
 
 ## 用法
 
-朋友要用起来，最短的流程是：找管家 bot 发 `/whoami` 拿到自己的 UID → 告诉你 → 你发
+“租户号”要用起来，最短的流程是：找管家 bot 发 `/whoami` 拿到自己的 UID → 告诉你 → 你发
 `/invite <uid>` → 他去 BotFather 建 bot → 回管家 bot 发 `/setup` 贴 token → 完成。
 每个 UID 最多 3 个 bot，webhook 自动注册。
 
@@ -129,8 +117,7 @@ Worker 侧用 `wrangler secret put` 加 `wrangler.toml` 的 `[vars]`；Docker �
 上游是 [LloydAsp/nfd](https://github.com/LloydAsp/nfd)——单租户、单文件 Worker，每个
 bot 的配置都在环境变量里，加一个 bot 就要改一次 Cloudflare 配置。我用 TypeScript 把它
 重写成多租户服务：配置搬进存储层，凭据静态加密，加了邀请制、限速、去重、SQLite 后端
-和 Docker 部署。我还删掉了上游的 UID 反诈名单——那是社区场景的需求，个人小规模自用
-时它只是一条对外网的运行时依赖。
+和 Docker 部署。我删掉了上游的 UID 反诈名单——那是社区场景的需求（如果以后有需求可能会加回来）。
 
 ## 文档
 
