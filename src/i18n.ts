@@ -1,3 +1,5 @@
+import { BLOCK_MAX_DURATION_DAYS, BLOCK_REASON_MAX_CHARS } from './config';
+import type { BlockEntry } from './security';
 import type { TgMessage } from './types';
 
 export type Locale = 'zh' | 'en';
@@ -424,6 +426,7 @@ export const T = {
             '回复一条转发的消息：',
             '  发任意内容 → 回复给原发送者',
             '  发 /block /unblock /checkblock → 屏蔽管理',
+            '  /block 可带时长与原因，如 /block 7d 广告（时长 30m / 12h / 7d / 2w，不写即永久）',
             '',
             '名片、位置、地点、文件与音频文件会照常送达，但可能暴露你的身份或带元数据；',
             '送达后会收到提醒，回复那条提醒发 /recall 可在 48 小时内撤回。',
@@ -450,6 +453,7 @@ export const T = {
             'Reply to a forwarded message:',
             '  any content → reply to the original sender',
             '  /block /unblock /checkblock → block management',
+            '  /block takes an optional duration and reason, e.g. /block 7d ads (30m / 12h / 7d / 2w; omit for permanent)',
             '',
             'Contacts, locations, venues, files and audio files are delivered as usual but may',
             'identify you or carry metadata; you get a notice, and replying /recall to that',
@@ -500,16 +504,23 @@ export const T = {
         'This forwarded message has expired or has no mapping; cannot execute that command.',
     ),
     blocked: bil(
-      (uk: string) => `已屏蔽 ${uk}`,
-      (uk: string) => `Blocked ${uk}`,
+      (uk: string, e: BlockEntry) => `已屏蔽 ${uk}${blockDetail(e, 'zh')}`,
+      (uk: string, e: BlockEntry) => `Blocked ${uk}${blockDetail(e, 'en')}`,
+    ),
+    blockUsage: bil(
+      () =>
+        `用法：/block [时长] [原因]，需回复一条转发消息。时长写成 30m / 12h / 7d / 2w（最长 ${BLOCK_MAX_DURATION_DAYS}d），不写即永久；原因不超过 ${BLOCK_REASON_MAX_CHARS} 字。`,
+      () =>
+        `Usage: /block [duration] [reason], as a reply to a forwarded message. Duration is 30m / 12h / 7d / 2w (at most ${BLOCK_MAX_DURATION_DAYS}d); omit it for a permanent block. Reason up to ${BLOCK_REASON_MAX_CHARS} characters.`,
     ),
     unblocked: bil(
       (uk: string) => `已解除屏蔽 ${uk}`,
       (uk: string) => `Unblocked ${uk}`,
     ),
     checkBlock: bil(
-      (uk: string, blocked: boolean) => `${uk} ${blocked ? '已屏蔽' : '未屏蔽'}`,
-      (uk: string, blocked: boolean) => `${uk} ${blocked ? 'blocked' : 'not blocked'}`,
+      (uk: string, e: BlockEntry | null) => `${uk} ${e ? `已屏蔽${blockDetail(e, 'zh')}` : '未屏蔽'}`,
+      (uk: string, e: BlockEntry | null) =>
+        `${uk} ${e ? `blocked${blockDetail(e, 'en')}` : 'not blocked'}`,
     ),
     commandNotRelayed: bil(
       () =>
@@ -564,3 +575,24 @@ const EXPOSURE_EN: Record<ExposureKind, string> = {
   location: 'location data reveals where you are',
   file: 'content sent as a file keeps its original metadata (EXIF position, author fields, ID3 tags); Telegram does not strip it',
 };
+
+const BLOCK_DETAIL_LABELS: Record<
+  Locale,
+  { until: string; reason: string; open: string; close: string }
+> = {
+  zh: { until: '至 ', reason: '原因：', open: '（', close: '）' },
+  en: { until: 'until ', reason: 'reason: ', open: ' (', close: ')' },
+};
+
+// Parenthesised expiry / reason suffix for a block, empty for a plain permanent block.
+export function blockDetail(e: BlockEntry, locale: Locale): string {
+  const L = BLOCK_DETAIL_LABELS[locale];
+  const parts: string[] = [];
+  if (e.until !== undefined) parts.push(L.until + formatUtcMinute(e.until));
+  if (e.reason) parts.push(L.reason + e.reason);
+  return parts.length === 0 ? '' : L.open + parts.join(' · ') + L.close;
+}
+
+function formatUtcMinute(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}

@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { env } from '../helpers';
 import {
   checkRateLimit,
   clearBlocked,
   constantTimeEqual,
   formatError,
+  getBlock,
   isBlocked,
   markUpdateSeen,
   seenUpdate,
@@ -91,8 +92,41 @@ describe('blocklist', () => {
     expect(await isBlocked(skv, uk)).toBe(false);
     await setBlocked(skv, uk);
     expect(await isBlocked(skv, uk)).toBe(true);
+    expect(await getBlock(skv, uk)).toEqual({});
     await clearBlocked(skv, uk);
     expect(await isBlocked(skv, uk)).toBe(false);
+  });
+
+  it('a value written by the old code ("1") reads as a permanent block with no detail', async () => {
+    const skv = freshSkv();
+    await skv.put('block-legacy', '1');
+    expect(await getBlock(skv, 'legacy')).toEqual({});
+    expect(await isBlocked(skv, 'legacy')).toBe(true);
+  });
+
+  it('a timed block keeps its detail and lifts itself once `until` passes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const skv = freshSkv();
+      const until = Date.now() + 5 * 60_000;
+      await setBlocked(skv, 'timed', { reason: 'spam', until });
+      expect(await getBlock(skv, 'timed')).toEqual({ reason: 'spam', until });
+      vi.setSystemTime(until - 1000);
+      expect(await isBlocked(skv, 'timed')).toBe(true);
+      vi.setSystemTime(until);
+      expect(await isBlocked(skv, 'timed')).toBe(false);
+      // The key carried a matching TTL, so the store reaped it on its own.
+      expect(await skv.getString('block-timed')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an expired `until` wins even while the store still serves the value', async () => {
+    const skv = freshSkv();
+    await skv.put('block-stale', JSON.stringify({ until: Date.now() - 1 }));
+    expect(await getBlock(skv, 'stale')).toBeNull();
+    expect(await isBlocked(skv, 'stale')).toBe(false);
   });
 });
 

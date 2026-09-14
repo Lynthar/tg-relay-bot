@@ -90,12 +90,13 @@ The host also has `/invite`, `/uninvite`, `/invites`, `/host_list`,
 `/host_disable`, `/host_purge` and `/host_migrate`.
 
 On a relay bot, `/block`, `/unblock` and `/checkblock` only work as a **reply to
-a forwarded message**. Contacts, locations, venues, files and audio files are
-delivered as usual, but the bot answers with a notice; reply `/recall` to that
-notice to delete the copy from the visitor's chat within 48 hours. Albums,
-forwards and every media type take the same path; visitors are rate-limited to
-5 messages per 60s by default (an album counting as one), updates are
-de-duplicated, and each bot can have up to 10 admins.
+a forwarded message**; `/block` takes an optional duration and reason
+(`/block 7d ads`), and a timed block lifts itself. Contacts, locations, venues,
+files and audio files are delivered as usual, but the bot answers with a notice;
+reply `/recall` to that notice to delete the copy from the visitor's chat within
+48 hours. Albums, forwards and every media type take the same path; visitors are
+rate-limited to 5 messages per 60s by default (an album counting as one),
+updates are de-duplicated, and each bot can have up to 10 admins.
 
 ## Configuration
 

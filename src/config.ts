@@ -26,6 +26,11 @@ export const RATE_LIMIT_MAX = 5;
 export const MSG_MAP_TTL_SEC = 30 * 24 * 3600;
 // Telegram lets a bot delete its own messages for 48 hours; a longer-lived pointer is useless.
 export const RECALL_TTL_SEC = 48 * 3600;
+// Telegram's own chat restrictions treat anything beyond 366 days as forever; past that,
+// the admin is told to block permanently instead.
+export const BLOCK_MAX_DURATION_DAYS = 366;
+// Keeps a /blocklist line well inside one Telegram message chunk.
+export const BLOCK_REASON_MAX_CHARS = 200;
 // HKDF info string for the host-level UID hash secret (manager keys and debug logs).
 export const UID_HASH_PURPOSE = 'tg-relay-bot/uid-hash/v1';
 export const DEDUP_TTL_SEC = 5 * 60;

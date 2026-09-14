@@ -49,15 +49,15 @@ README 只讲这个项目是什么。这份文档是完整参考：怎么用、�
 | 操作 | 效果 |
 |---|---|
 | reply 一条转发消息发任意文字 | 该文字回复给原发送者 |
-| reply 一条转发消息发 `/block` | 屏蔽该访客 |
+| reply 一条转发消息发 `/block [时长] [原因]` | 屏蔽该访客。时长写成 `30m` / `12h` / `7d` / `2w`（最长 366d），不写即永久，到期自动解封；原因不超过 200 字 |
 | reply 一条转发消息发 `/unblock` | 解除屏蔽 |
-| reply 一条转发消息发 `/checkblock` | 查询是否屏蔽 |
+| reply 一条转发消息发 `/checkblock` | 查询是否屏蔽，附到期时间与原因 |
 | reply 一条「已送达」提醒发 `/recall` | 从访客那里删掉那条回复（48 小时内） |
-| 发 `/blocklist` | 列出所有被屏蔽访客的 userKey |
+| 发 `/blocklist` | 列出所有被屏蔽访客的 userKey，附到期时间与原因 |
 | 发 `/unblock <userKey>` | 按 userKey 解除屏蔽（无需 reply） |
 | 发 `/status` | 看该 bot 的运行状态（msg-map 数 / 黑名单数等） |
 
-⚠️ `/block` **必须是回复一条转发消息**才生效——禁止裸输入 UID，避免误伤。解除屏蔽有一个例外：被屏蔽的访客不再产生新转发，老转发 30 天后过期，届时用 `/unblock <userKey>`（参数是匿名哈希，见 `/blocklist`），而不是 UID。
+⚠️ `/block` **必须是回复一条转发消息**才生效——禁止裸输入 UID，避免误伤。解除屏蔽有一个例外：被屏蔽的访客不再产生新转发，老转发 30 天后过期，届时用 `/unblock <userKey>`（参数是匿名哈希，见 `/blocklist`），而不是 UID。时长必须是第一个参数，以数字开头的第一个词会被当成时长，写错（`7 days`、`7x`）会被拒绝而不是变成永久屏蔽；原因按原样存进存储、只有管理员看得到，别把访客的姓名或 UID 写进去。
 
 ### 管理你拥有的 bot
 
@@ -285,11 +285,11 @@ Docker 轨故障排查：
 | 操作 | 效果 |
 |---|---|
 | reply 一条转发消息发任意文字 | 该文字回复给原访客 |
-| reply 一条转发消息发 `/block` | 拉黑该访客 |
+| reply 一条转发消息发 `/block [时长] [原因]` | 拉黑该访客；时长如 `7d`（`m` / `h` / `d` / `w`，最长 366d），不写即永久，到期自动解封 |
 | reply 一条转发消息发 `/unblock` | 解黑 |
-| reply 一条转发消息发 `/checkblock` | 查询是否被屏蔽 |
+| reply 一条转发消息发 `/checkblock` | 查询是否被屏蔽，附到期时间与原因 |
 | reply 一条「已送达」提醒发 `/recall` | 从访客那里删掉对应的回复；Telegram 只允许 bot 删自己 48 小时内发出的消息 |
-| 发 `/blocklist` | 列出被屏蔽访客的 userKey |
+| 发 `/blocklist` | 列出被屏蔽访客的 userKey，附到期时间与原因 |
 | 发 `/unblock <userKey>` | 按 userKey 解除屏蔽（应对原转发消息已过期的情况） |
 | 发 `/status` | 显示运行状态（msg-map / block / rate-limit windows 计数） |
 
@@ -506,7 +506,7 @@ curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
 | `tenant:{botId}:cfg`（含加密 token 与 secrets） | 直到 `/delete --yes` |
 | `tenant:{botId}:msg-map-{adminKey}-{id}`（`adminKey` 是管理员 UID 的 HMAC） | 30 天后 TTL 过期 |
 | `tenant:{botId}:recall-{adminKey}-{id}`（撤回指针） | 48 小时后 TTL 过期 |
-| `tenant:{botId}:block-{userKey}` | 直到 `/unblock` |
+| `tenant:{botId}:block-{userKey}`（值含到期时间与原因） | 直到 `/unblock`；带时长的到期后 TTL 过期 |
 | `tenant:{botId}:rate-{userKey}` | 60 秒后 TTL 过期 |
 | `tenant:{botId}:update-{id}` | 5 分钟后 TTL 过期 |
 | `tenant:{botId}:mg-*` / `album-*`（相册标签与限速去重标记） | 60 秒后 TTL 过期 |

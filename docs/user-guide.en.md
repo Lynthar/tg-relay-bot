@@ -49,15 +49,15 @@ In the chat with **your own bot** (not the manager bot):
 | Action | Effect |
 |---|---|
 | Reply to a forwarded message with any text | Text is sent back to the original guest |
-| Reply to a forwarded message with `/block` | Block that guest |
+| Reply to a forwarded message with `/block [duration] [reason]` | Block that guest. Duration is `30m` / `12h` / `7d` / `2w` (366d at most); omit it for a permanent block, otherwise the block lifts itself when it expires. Reason up to 200 characters |
 | Reply to a forwarded message with `/unblock` | Unblock |
-| Reply to a forwarded message with `/checkblock` | Show whether blocked |
+| Reply to a forwarded message with `/checkblock` | Show whether blocked, with expiry and reason |
 | Reply to a "Delivered" notice with `/recall` | Delete that reply from the guest's chat (within 48 hours) |
-| Send `/blocklist` | List blocked guests' userKeys |
+| Send `/blocklist` | List blocked guests' userKeys with expiry and reason |
 | Send `/unblock <userKey>` | Unblock by userKey (no reply needed) |
 | Send `/status` | Show that bot's stats (msg-map / blocked / rate-limit counts) |
 
-⚠️ `/block` **must be a reply to a forwarded message**. Naked UID arguments are not accepted, to prevent fat-finger blocks. Unblocking has one escape hatch: a blocked guest produces no new forwards and old ones expire after 30 days, so use `/unblock <userKey>` (the anonymous hash from `/blocklist`), never a UID.
+⚠️ `/block` **must be a reply to a forwarded message**. Naked UID arguments are not accepted, to prevent fat-finger blocks. Unblocking has one escape hatch: a blocked guest produces no new forwards and old ones expire after 30 days, so use `/unblock <userKey>` (the anonymous hash from `/blocklist`), never a UID. The duration must come first; a first word that starts with a digit is read as a duration, and a mistyped one (`7 days`, `7x`) is refused rather than turned into a permanent block. The reason is stored as typed and shown only to admins — keep the guest's name or UID out of it.
 
 ### Manage your bots
 
@@ -287,11 +287,11 @@ For admins only (the owner plus anyone they added via `/admins`):
 | Action | Effect |
 |---|---|
 | Reply to a forwarded message with any text | Text is sent back to the original guest |
-| Reply with `/block` | Block that guest |
+| Reply with `/block [duration] [reason]` | Block that guest; duration like `7d` (`m` / `h` / `d` / `w`, 366d at most), omit for permanent; a timed block lifts itself on expiry |
 | Reply with `/unblock` | Unblock |
-| Reply with `/checkblock` | Show block status |
+| Reply with `/checkblock` | Show block status with expiry and reason |
 | Reply to a "Delivered" notice with `/recall` | Delete the corresponding reply from the guest's chat; Telegram only lets a bot delete its own messages within 48 hours |
-| Send `/blocklist` | List blocked guests' userKeys |
+| Send `/blocklist` | List blocked guests' userKeys with expiry and reason |
 | Send `/unblock <userKey>` | Unblock by userKey (for when the original forward has expired) |
 | Send `/status` | Show stats (msg-map / blocked / rate-limit windows counts) |
 
@@ -508,7 +508,7 @@ Both storage backends share the same key layout. Cloudflare KV expires keys nati
 | `tenant:{botId}:cfg` (encrypted token & secrets) | Until `/delete --yes` |
 | `tenant:{botId}:msg-map-{adminKey}-{id}` (`adminKey` is an HMAC of the admin's UID) | TTL 30 days |
 | `tenant:{botId}:recall-{adminKey}-{id}` (recall pointer) | TTL 48 hours |
-| `tenant:{botId}:block-{userKey}` | Until `/unblock` |
+| `tenant:{botId}:block-{userKey}` (value holds expiry and reason) | Until `/unblock`; a timed block expires by TTL |
 | `tenant:{botId}:rate-{userKey}` | TTL 60 seconds |
 | `tenant:{botId}:update-{id}` | TTL 5 minutes |
 | `tenant:{botId}:mg-*` / `album-*` (album tag & rate-unit dedup markers) | TTL 60 seconds |

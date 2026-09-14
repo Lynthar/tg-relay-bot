@@ -76,7 +76,8 @@ bot 主人管自己的 bot：
 host 另有 `/invite` `/uninvite` `/invites` `/host_list` `/host_disable`
 `/host_purge` `/host_migrate`。
 
-在中继 bot 那边，`/block` `/unblock` `/checkblock` 必须**回复某条转发消息**才生效。
+在中继 bot 那边，`/block` `/unblock` `/checkblock` 必须**回复某条转发消息**才生效，
+`/block` 可带时长与原因（`/block 7d 广告`），到期自动解封。
 名片、位置、地点、文件和音频文件照常送达，但 bot 会回一条提醒，回复那条提醒发 `/recall`
 可在 48 小时内从访客那里删掉。相册、转发、各类媒体走同一套处理逻辑；访客限速默认
 60 秒 5 条（相册整组算一条），update 去重，每 bot 最多 10 个管理员。

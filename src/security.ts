@@ -85,12 +85,45 @@ export async function checkRateLimit(
   return true;
 }
 
-export async function isBlocked(skv: ScopedKV, uk: string): Promise<boolean> {
-  return (await skv.getString(`block-${uk}`)) === '1';
+export interface BlockEntry {
+  reason?: string;
+  // Epoch ms at which the block lifts; absent means permanent.
+  until?: number;
 }
 
-export async function setBlocked(skv: ScopedKV, uk: string): Promise<void> {
-  await skv.put(`block-${uk}`, '1');
+// Value the pre-timed-block code wrote: a permanent block with nothing to say about it.
+const LEGACY_BLOCK_VALUE = '1';
+
+export async function getBlock(skv: ScopedKV, uk: string): Promise<BlockEntry | null> {
+  const raw = await skv.getString(`block-${uk}`);
+  if (raw === null) return null;
+  const entry: BlockEntry = raw === LEGACY_BLOCK_VALUE ? {} : JSON.parse(raw);
+  // The key expires with `until`, but a KV edge cache may serve it for up to a minute longer;
+  // the timestamp decides, so an expired block never drops a message.
+  if (entry.until !== undefined && entry.until <= Date.now()) return null;
+  return entry;
+}
+
+export async function isBlocked(skv: ScopedKV, uk: string): Promise<boolean> {
+  return (await getBlock(skv, uk)) !== null;
+}
+
+/**
+ * @param entry.until Must lie at least MIN_EXPIRATION_TTL_SEC (60 s) ahead: it becomes the
+ *   key's expirationTtl, and the store rejects a nearer value (RangeError).
+ * @throws RangeError when `until` is not in the future — a zero TTL would mean "never expires".
+ */
+export async function setBlocked(
+  skv: ScopedKV,
+  uk: string,
+  entry: BlockEntry = {},
+): Promise<void> {
+  let ttlSec: number | undefined;
+  if (entry.until !== undefined) {
+    ttlSec = Math.ceil((entry.until - Date.now()) / 1000);
+    if (ttlSec <= 0) throw new RangeError('block `until` must be in the future');
+  }
+  await skv.put(`block-${uk}`, JSON.stringify(entry), ttlSec);
 }
 
 export async function clearBlocked(skv: ScopedKV, uk: string): Promise<void> {

@@ -1,6 +1,6 @@
 import * as tg from './telegram';
 import { TelegramError, parseBotCommand } from './telegram';
-import { RECALL_TTL_SEC } from './config';
+import { BLOCK_MAX_DURATION_DAYS, BLOCK_REASON_MAX_CHARS, RECALL_TTL_SEC } from './config';
 import {
   deleteRecall,
   getMsgMap,
@@ -9,12 +9,23 @@ import {
   putRecall,
   type ScopedKV,
 } from './storage';
-import { setBlocked, clearBlocked, isBlocked, logError, logEvent, operatorKey } from './security';
+import {
+  type BlockEntry,
+  setBlocked,
+  clearBlocked,
+  getBlock,
+  isBlocked,
+  logError,
+  logEvent,
+  operatorKey,
+} from './security';
 import type { TgMessage } from './types';
 import type { TenantCfg } from './tenant';
-import { type ExposureKind, type Locale, T } from './i18n';
+import { type ExposureKind, type Locale, T, blockDetail } from './i18n';
 
-type ReplyCmd = 'block' | 'unblock' | 'checkblock' | 'recall';
+type ReplyAction =
+  | { cmd: 'block'; entry: BlockEntry }
+  | { cmd: 'unblock' | 'checkblock' | 'recall' };
 
 export async function handleAdminMessage(
   cfg: TenantCfg,
@@ -39,26 +50,65 @@ export async function handleAdminMessage(
     await handleUnblockByKey(cfg, skv, debug, message, parsed.args.split(/\s+/)[0], locale);
     return;
   }
-  const replyCmd = asReplyCmd(parsed);
+  let action: ReplyAction | null;
+  if (parsed?.cmd === 'block') {
+    const entry = parseBlockArgs(parsed.args);
+    if (!entry) {
+      await tg.sendMessage(cfg.botToken, {
+        chat_id: message.chat.id,
+        text: T.commands.blockUsage[locale](),
+      });
+      return;
+    }
+    action = { cmd: 'block', entry };
+  } else {
+    action = asReplyAction(parsed);
+  }
   // Anything else that still looks like a command — a typo ("/bloc"), stray
-  // arguments ("/block him"), a foreign @suffix — is refused instead of being
+  // arguments ("/checkblock him"), a foreign @suffix — is refused instead of being
   // copied to the guest, which would leak the admin's moderation intent.
-  if (!replyCmd && text.startsWith('/')) {
+  if (!action && text.startsWith('/')) {
     await tg.sendMessage(cfg.botToken, {
       chat_id: message.chat.id,
       text: T.commands.commandNotRelayed[locale](),
     });
     return;
   }
-  await handleAdminReply(cfg, skv, debug, message, locale, replyCmd);
+  await handleAdminReply(cfg, skv, debug, message, locale, action);
 }
 
-function asReplyCmd(parsed: { cmd: string; args: string } | null): ReplyCmd | null {
+function asReplyAction(parsed: { cmd: string; args: string } | null): ReplyAction | null {
   if (!parsed || parsed.args) return null;
   const { cmd } = parsed;
-  return cmd === 'block' || cmd === 'unblock' || cmd === 'checkblock' || cmd === 'recall'
-    ? cmd
-    : null;
+  return cmd === 'unblock' || cmd === 'checkblock' || cmd === 'recall' ? { cmd } : null;
+}
+
+const DURATION_RE = /^(\d+)([mhdw])$/i;
+const DURATION_MS: Record<string, number> = {
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+  w: 604_800_000,
+};
+
+// "/block [<n>m|h|d|w] [reason]". A first word that starts with a digit must be a duration:
+// a mistyped one ("7 days", "7x") is refused rather than becoming a permanent block whose
+// reason is the typo. Returns null when the arguments are unusable.
+function parseBlockArgs(args: string): BlockEntry | null {
+  const entry: BlockEntry = {};
+  let reason = args;
+  const first = args.split(/\s/, 1)[0];
+  if (/^\d/.test(first)) {
+    const m = first.match(DURATION_RE);
+    if (!m) return null;
+    const ms = Number(m[1]) * DURATION_MS[m[2].toLowerCase()];
+    if (ms === 0 || ms > BLOCK_MAX_DURATION_DAYS * DURATION_MS.d) return null;
+    entry.until = Date.now() + ms;
+    reason = args.slice(first.length).trim();
+  }
+  if (reason.length > BLOCK_REASON_MAX_CHARS) return null;
+  if (reason) entry.reason = reason;
+  return entry;
 }
 
 // Content an admin might send that identifies them to the guest. Delivered anyway (the
@@ -116,16 +166,24 @@ async function handleBlocklist(
 ): Promise<void> {
   const { names, complete } = await skv.listScoped('block-');
   const uks = names.map((n) => n.slice('block-'.length));
-  if (uks.length === 0) {
+  // Read each value for its expiry and reason; a block that lapsed since the listing drops out.
+  const lines = (
+    await Promise.all(
+      uks.map(async (uk) => {
+        const entry = await getBlock(skv, uk);
+        return entry && `· ${uk}${blockDetail(entry, locale)}`;
+      }),
+    )
+  ).filter((line): line is string => line !== null);
+  if (lines.length === 0) {
     await tg.sendMessage(cfg.botToken, {
       chat_id: message.chat.id,
       text: T.commands.blocklistEmpty[locale](),
     });
     return;
   }
-  let buf = T.commands.blocklistHeader[locale](uks.length, complete);
-  for (const uk of uks) {
-    const line = `· ${uk}`;
+  let buf = T.commands.blocklistHeader[locale](lines.length, complete);
+  for (const line of lines) {
     const candidate = `${buf}\n${line}`;
     if (candidate.length > BLOCKLIST_CHUNK_MAX) {
       await tg.sendMessage(cfg.botToken, { chat_id: message.chat.id, text: buf });
@@ -179,7 +237,7 @@ async function handleAdminReply(
   debug: boolean,
   message: TgMessage,
   locale: Locale,
-  cmd: ReplyCmd | null,
+  action: ReplyAction | null,
 ): Promise<void> {
   const reply = message.reply_to_message;
   if (!reply) {
@@ -190,14 +248,14 @@ async function handleAdminReply(
     return;
   }
 
-  if (cmd === 'recall') {
+  if (action?.cmd === 'recall') {
     await handleRecall(cfg, skv, message, reply.message_id, locale);
     return;
   }
 
   const entry = await lookupEntry(cfg, skv, String(message.chat.id), reply.message_id);
 
-  if (cmd) {
+  if (action) {
     if (!entry) {
       await tg.sendMessage(cfg.botToken, {
         chat_id: message.chat.id,
@@ -209,19 +267,19 @@ async function handleAdminReply(
     // failure must reach them as "did not take effect", not as silence.
     let text: string;
     try {
-      if (cmd === 'block') {
-        await setBlocked(skv, entry.userKey);
+      if (action.cmd === 'block') {
+        await setBlocked(skv, entry.userKey, action.entry);
         logEvent(debug, 'block_set', { uk: entry.userKey });
-        text = T.commands.blocked[locale](entry.userKey);
-      } else if (cmd === 'unblock') {
+        text = T.commands.blocked[locale](entry.userKey, action.entry);
+      } else if (action.cmd === 'unblock') {
         await clearBlocked(skv, entry.userKey);
         logEvent(debug, 'block_clear', { uk: entry.userKey });
         text = T.commands.unblocked[locale](entry.userKey);
       } else {
-        text = T.commands.checkBlock[locale](entry.userKey, await isBlocked(skv, entry.userKey));
+        text = T.commands.checkBlock[locale](entry.userKey, await getBlock(skv, entry.userKey));
       }
     } catch (e) {
-      logError(`admin_${cmd}`, e);
+      logError(`admin_${action.cmd}`, e);
       text = T.commands.blockOpFailed[locale]();
     }
     await tg.sendMessage(cfg.botToken, { chat_id: message.chat.id, text });

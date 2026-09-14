@@ -12,7 +12,7 @@ import {
   tgMock,
   setTenantAdmins,
 } from '../helpers';
-import { operatorKey, userKey } from '../../src/security';
+import { getBlock, operatorKey, userKey } from '../../src/security';
 import type { TgMessage } from '../../src/types';
 import { ScopedKV } from '../../src/storage';
 import { getStored, putStored } from '../../src/tenant';
@@ -411,12 +411,12 @@ describe('/blocklist and /unblock <userKey> (no-reply block management)', () => 
   const UK_A = 'a'.repeat(32);
   const UK_B = 'b'.repeat(32);
 
-  it('/blocklist lists blocked userKeys', async () => {
+  it('/blocklist lists blocked userKeys with their expiry and reason', async () => {
     const adminUid = 510001;
     const t = await provisionTenant({ botId: '510000', ownerUid: String(adminUid) });
     const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
     await skv.put(`block-${UK_A}`, '1');
-    await skv.put(`block-${UK_B}`, '1');
+    await skv.put(`block-${UK_B}`, JSON.stringify({ reason: 'spam', until: Date.UTC(2031, 0, 2, 3, 4) }));
 
     await postWebhook(
       t.botId,
@@ -428,8 +428,8 @@ describe('/blocklist and /unblock <userKey> (no-reply block management)', () => 
     const sends = tgMock.getCallsByMethod('sendMessage');
     expect(sends.length).toBe(1);
     const text = String(sends[0].body?.text);
-    expect(text).toContain(UK_A);
-    expect(text).toContain(UK_B);
+    expect(text).toContain(`· ${UK_A}\n`);
+    expect(text).toContain(`· ${UK_B}（至 2031-01-02 03:04 UTC · 原因：spam）`);
   });
 
   it('/blocklist with no blocked guests reports empty', async () => {
@@ -759,11 +759,11 @@ describe('mistyped admin commands never leak to the guest', () => {
     const adminUid = 220001;
     const { t, skv, uk } = await provisionWithMapping('220001', adminUid);
     await replyAs(t, adminUid, `/block@${t.cfg.botUsername}`);
-    expect(await skv.getString(`block-${uk}`)).toBe('1');
+    expect(await getBlock(skv, uk)).toEqual({});
 
     await skv.delete(`block-${uk}`);
     await replyAs(t, adminUid, '/Block');
-    expect(await skv.getString(`block-${uk}`)).toBe('1');
+    expect(await getBlock(skv, uk)).toEqual({});
     expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
   });
 
@@ -776,12 +776,15 @@ describe('mistyped admin commands never leak to the guest', () => {
     expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已拦截/);
   });
 
-  it('/block with arguments is intercepted, not executed and not copied', async () => {
+  it('/block with a reason blocks with that reason recorded, nothing copied', async () => {
     const adminUid = 220003;
     const { t, skv, uk } = await provisionWithMapping('220003', adminUid);
     await replyAs(t, adminUid, '/block 拉黑他');
     expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
-    expect(await skv.getString(`block-${uk}`)).toBeNull();
+    expect(await getBlock(skv, uk)).toEqual({ reason: '拉黑他' });
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toBe(
+      `已屏蔽 ${uk}（原因：拉黑他）`,
+    );
   });
 
   it("/block@another_bot is intercepted (admin chat, unlike the guest path)", async () => {
@@ -845,8 +848,72 @@ describe('admin block commands report a storage failure instead of going silent'
     const adminUid = 220011;
     const { t, skv, uk } = await provisionWithMapping('220011', adminUid);
     await replyAs(t, adminUid, '/block');
-    expect(await skv.getString(`block-${uk}`)).toBe('1');
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已屏蔽/);
+    expect(await getBlock(skv, uk)).toEqual({});
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toBe(`已屏蔽 ${uk}`);
+  });
+});
+
+describe('timed blocks: /block <duration> [reason]', () => {
+  const DAY_MS = 24 * 3600 * 1000;
+
+  async function guestSends(t: { botId: string; webhookSecret: string }, chatId: number) {
+    await postWebhook(t.botId, t.webhookSecret, buildUpdate({ chatId, text: 'hi' }));
+    await flush();
+  }
+
+  it('drops the guest until the duration passes, then relays again', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const adminUid = 240001;
+      const { t, skv, uk } = await provisionWithMapping('240001', adminUid);
+      const guestChat = 48000 + adminUid;
+      const before = Date.now();
+      await replyAs(t, adminUid, '/block 7d too many links');
+      const entry = await getBlock(skv, uk);
+      expect(entry?.reason).toBe('too many links');
+      expect(entry?.until).toBeGreaterThanOrEqual(before + 7 * DAY_MS);
+      expect(entry?.until).toBeLessThanOrEqual(Date.now() + 7 * DAY_MS);
+      expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(
+        new RegExp(`^已屏蔽 ${uk}（至 \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d UTC · 原因：too many links）$`),
+      );
+
+      await guestSends(t, guestChat);
+      expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(0);
+
+      vi.setSystemTime(entry!.until! + 1000);
+      await guestSends(t, guestChat);
+      expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(1);
+      expect(await skv.getString(`block-${uk}`)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('/checkblock reports the expiry and reason', async () => {
+    const adminUid = 240002;
+    const { t, skv, uk } = await provisionWithMapping('240002', adminUid);
+    await skv.put(
+      `block-${uk}`,
+      JSON.stringify({ reason: 'spam', until: Date.UTC(2031, 5, 7, 8, 9) }),
+    );
+    await replyAs(t, adminUid, '/checkblock');
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toBe(
+      `${uk} 已屏蔽（至 2031-06-07 08:09 UTC · 原因：spam）`,
+    );
+  });
+
+  it.each([
+    ['7 days', 240010],
+    ['7x', 240011],
+    ['0d', 240012],
+    ['400d', 240013],
+    [`1h ${'x'.repeat(201)}`, 240014],
+  ])('"/block %s" is refused with the usage line and blocks nobody', async (args, adminUid) => {
+    const { t, skv, uk } = await provisionWithMapping(String(adminUid), adminUid);
+    await replyAs(t, adminUid, `/block ${args}`);
+    expect(await skv.getString(`block-${uk}`)).toBeNull();
+    expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
+    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/^用法：\/block/);
   });
 });
 
