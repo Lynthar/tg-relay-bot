@@ -88,11 +88,8 @@ describe('relay happy-path (sanity)', () => {
 });
 
 describe('rate limit (5/60s, 6th dropped)', () => {
-  it('only 5 of 6 messages within the window trigger forwardMessage', async () => {
-    const t = await provisionTenant({ botId: '200001', ownerUid: 'owner-200001' });
-    const guest = 5551;
-
-    for (let i = 0; i < 6; i++) {
+  async function guestSends(t: { botId: string; webhookSecret: string }, guest: number, n: number) {
+    for (let i = 0; i < n; i++) {
       const r = await postWebhook(
         t.botId,
         t.webhookSecret,
@@ -101,10 +98,40 @@ describe('rate limit (5/60s, 6th dropped)', () => {
       expect(r.status).toBe(200);
       await flush();
     }
+  }
+
+  function noticesTo(guest: number) {
+    return tgMock
+      .getCallsByMethod('sendMessage')
+      .filter((c) => c.body?.chat_id === guest)
+      .map((c) => String(c.body?.text));
+  }
+
+  it('only 5 of 7 messages within the window trigger forwardMessage', async () => {
+    const t = await provisionTenant({ botId: '200001', ownerUid: 'owner-200001' });
+    const guest = 5551;
+    await guestSends(t, guest, 7);
 
     expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(5);
     const skv = new ScopedKV(env.nfd, `tenant:${t.botId}:`);
     expect((await skv.list('msg-map-')).keys.length).toBe(5);
+  });
+
+  it('the guest is told once per window, without numbers, and again in the next window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const t = await provisionTenant({ botId: '200008', ownerUid: 'owner-200008' });
+      const guest = 5558;
+      await guestSends(t, guest, 8);
+      expect(noticesTo(guest)).toEqual(['发送过于频繁，请稍后再试。']);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      await guestSends(t, guest, 7);
+      expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(10);
+      expect(noticesTo(guest).length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -719,6 +746,8 @@ describe('media group counts as one rate unit (album admission)', () => {
       await flush();
     }
     expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(5);
+    // Three rejected items, one notice: the album is one unit for the notice as well.
+    expect(tgMock.getCallsByMethod('sendMessage').length).toBe(1);
   });
 });
 

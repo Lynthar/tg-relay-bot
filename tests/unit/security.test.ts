@@ -58,30 +58,60 @@ describe('constantTimeEqual', () => {
 });
 
 describe('checkRateLimit', () => {
-  it('allows first 5, blocks 6th within window', async () => {
+  it('admits the first 5; the 6th is the one rejection that carries a notice, later ones do not', async () => {
     const skv = freshSkv();
     const uk = 'rl-test';
-    const results: boolean[] = [];
-    for (let i = 0; i < 6; i++) {
+    const results: string[] = [];
+    for (let i = 0; i < 8; i++) {
       results.push(await checkRateLimit(skv, uk, 60, 5));
     }
-    expect(results).toEqual([true, true, true, true, true, false]);
+    expect(results).toEqual([
+      'admitted',
+      'admitted',
+      'admitted',
+      'admitted',
+      'admitted',
+      'limited_first',
+      'limited',
+      'limited',
+    ]);
   });
 
   it('separate userKeys have independent counters', async () => {
     const skv = freshSkv();
     for (let i = 0; i < 5; i++) {
-      expect(await checkRateLimit(skv, 'uk-a', 60, 5)).toBe(true);
+      expect(await checkRateLimit(skv, 'uk-a', 60, 5)).toBe('admitted');
     }
-    expect(await checkRateLimit(skv, 'uk-a', 60, 5)).toBe(false);
-    expect(await checkRateLimit(skv, 'uk-b', 60, 5)).toBe(true);
+    expect(await checkRateLimit(skv, 'uk-a', 60, 5)).toBe('limited_first');
+    expect(await checkRateLimit(skv, 'uk-b', 60, 5)).toBe('admitted');
   });
 
-  it('rejections do not persist: stored count stays at max', async () => {
+  it('only the first rejection is persisted (count = max + 1); the flood after it writes nothing', async () => {
     const skv = freshSkv();
-    for (let i = 0; i < 8; i++) await checkRateLimit(skv, 'uk-c', 60, 5);
+    const put = vi.spyOn(env.nfd, 'put');
+    try {
+      for (let i = 0; i < 8; i++) await checkRateLimit(skv, 'uk-c', 60, 5);
+      expect(put).toHaveBeenCalledTimes(6);
+    } finally {
+      put.mockRestore();
+    }
     const state = await skv.getJson<{ count: number }>('rate-uk-c');
-    expect(state?.count).toBe(5);
+    expect(state?.count).toBe(6);
+  });
+
+  it('a fresh window admits again and carries its own single notice', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const skv = freshSkv();
+      for (let i = 0; i < 7; i++) await checkRateLimit(skv, 'uk-d', 60, 5);
+      vi.setSystemTime(Date.now() + 61_000);
+      expect(await checkRateLimit(skv, 'uk-d', 60, 5)).toBe('admitted');
+      for (let i = 0; i < 4; i++) await checkRateLimit(skv, 'uk-d', 60, 5);
+      expect(await checkRateLimit(skv, 'uk-d', 60, 5)).toBe('limited_first');
+      expect(await checkRateLimit(skv, 'uk-d', 60, 5)).toBe('limited');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

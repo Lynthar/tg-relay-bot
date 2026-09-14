@@ -9,6 +9,7 @@ import * as tg from './telegram';
 import { TelegramError, parseBotCommand } from './telegram';
 import { putMsgMap, type MsgMapEntry, type ScopedKV } from './storage';
 import {
+  type RateLimitVerdict,
   userKey,
   isBlocked,
   checkRateLimit,
@@ -58,7 +59,7 @@ export async function handleMessage(
   }
 
   // The dedup mark is deferred to just before the first non-idempotent side
-  // effect (admin command / relay), so messages dropped below cost no KV writes.
+  // effect (admin command / relay), so messages dropped below cost no dedup write.
   if (isAdmin) {
     await markUpdateSeen(skv, updateId, DEDUP_TTL_SEC);
     await handleAdminMessage(cfg, skv, debug, message, locale);
@@ -72,9 +73,17 @@ export async function handleMessage(
     return;
   }
 
-  const allowed = await admitGuestMessage(skv, uk, message);
-  if (!allowed) {
+  const verdict = await admitGuestMessage(skv, uk, message);
+  if (verdict !== 'admitted') {
     logEvent(debug, 'guest_rate_limited', { uk });
+    // Once per window and without numbers: enough for a person to learn why nothing arrives,
+    // too sparse to serve a flooder as a probe of the threshold.
+    if (verdict === 'limited_first') {
+      await tg.sendMessage(cfg.botToken, {
+        chat_id: message.chat.id,
+        text: T.relay.rateLimited[locale](),
+      });
+    }
     return;
   }
 
@@ -89,18 +98,18 @@ async function admitGuestMessage(
   skv: ScopedKV,
   uk: string,
   message: TgMessage,
-): Promise<boolean> {
+): Promise<RateLimitVerdict> {
   const albumId = message.media_group_id;
   if (!albumId) return checkRateLimit(skv, uk, RATE_LIMIT_WINDOW_SEC, RATE_LIMIT_MAX);
   const albumKey = `album-${uk}-${albumId}`;
-  if (await skv.getString(albumKey)) return true;
-  const allowed = await checkRateLimit(skv, uk, RATE_LIMIT_WINDOW_SEC, RATE_LIMIT_MAX);
-  if (allowed) {
+  if (await skv.getString(albumKey)) return 'admitted';
+  const verdict = await checkRateLimit(skv, uk, RATE_LIMIT_WINDOW_SEC, RATE_LIMIT_MAX);
+  if (verdict === 'admitted') {
     // Best-effort (concurrent first items may race): a lost marker only means one
     // extra rate unit for the same album.
     await tryPut(skv, albumKey, '1', MEDIA_GROUP_TAG_TTL_SEC, 'album_put');
   }
-  return allowed;
+  return verdict;
 }
 
 async function relayToAdmins(

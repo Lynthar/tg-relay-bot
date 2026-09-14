@@ -64,25 +64,28 @@ export async function tryPut(
   }
 }
 
+// 'limited_first' is the first rejection of a window — the caller's cue to tell the guest once.
+export type RateLimitVerdict = 'admitted' | 'limited' | 'limited_first';
+
 export async function checkRateLimit(
   skv: ScopedKV,
   uk: string,
   windowSec: number,
   max: number,
-): Promise<boolean> {
+): Promise<RateLimitVerdict> {
   const k = `rate-${uk}`;
   const now = Date.now();
   const cur = await skv.getJson<RateLimitState>(k);
-  const fresh = !cur || now - cur.start > windowSec * 1000;
-  const next: RateLimitState = fresh
-    ? { start: now, count: 1 }
-    : { start: cur.start, count: cur.count + 1 };
-  if (next.count > max) return false;
-  // Persisted only for admitted messages: over the limit the stored count no longer changes the
-  // decision (it stays above max until the window lapses), and skipping the write keeps a flood
-  // from hammering this key.
+  const next: RateLimitState =
+    cur && now - cur.start <= windowSec * 1000
+      ? { start: cur.start, count: cur.count + 1 }
+      : { start: now, count: 1 };
+  // A stored count of max + 1 records that the window's notice went out. Beyond it nothing is
+  // persisted: the decision cannot change until the window lapses, and skipping the write keeps
+  // a flood from hammering this key.
+  if (next.count > max + 1) return 'limited';
   await tryPut(skv, k, JSON.stringify(next), windowSec, 'rate_put');
-  return true;
+  return next.count > max ? 'limited_first' : 'admitted';
 }
 
 export interface BlockEntry {

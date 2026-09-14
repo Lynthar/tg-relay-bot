@@ -458,14 +458,14 @@ curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
 
 首先保护的是运营者——bot 后面的人；访客只做基础保护。
 
-- 访客看到的发信人始终是 bot：回复用 copyMessage 发出，没有转发头、没有发信人；管理员发的未识别斜杠命令一律拦下，不会漏给访客；被拉黑或超限的访客得不到任何提示，也就没有信道去试探
+- 访客看到的发信人始终是 bot：回复用 copyMessage 发出，没有转发头、没有发信人；管理员发的未识别斜杠命令一律拦下，不会漏给访客；被拉黑的访客得不到任何提示，超限的访客每个限速窗口只收到一句「稍后再试」，不带阈值和窗口，刷量者拿不到可用的反馈
 - 会暴露运营者的内容——名片、位置、地点、带元数据的文件——照常送达但会提醒，并能在 48 小时内 `/recall`
 - 存储里没有运营者身份：owner 与管理员的 UID 以 AES-GCM 加密存放，msg-map、相册标记、撤回指针、邀请列表、onboarding 状态这些键里放的是 HMAC 哈希，不是 UID；`ENV_DEBUG=1` 的事件日志同样只记哈希。单独拿到存储 dump 或日志的人知道这套部署托管了哪些 bot，不知道谁在运营（从旧版本升级的部署需先运行一次 `/host_migrate`）
 - 访客 chatId 在存储层以 HMAC-SHA256 哈希存储（`userKey`），dump 存储也看不到 chatId 明文（例外是回复路由用的 msg-map 与撤回指针，分别保留 30 天与 48 小时后自动过期）
 - 所有 tenant 的 token、webhook secret、hashSecret 都以 AES-GCM 加密存储——单独拿到存储 dump（没有 `ENV_MASTER_ENC_KEY`）无法对 userKey 做离线暴力反推
 - webhook 鉴权依赖每租户随机的 `secret_token` header（constant-time 比较，防侧信道），而非路径保密——路径中的 botId 本身是公开信息；secret 缺失或错误一律返回统一的 404，无法用于探测某个 bot 是否托管在此
 - Telegram 重发的 webhook 自动去重（`update_id`）
-- 每访客 60s 内最多 5 条；超出静默丢弃
+- 每访客 60s 内最多 5 条；超出丢弃，每个窗口只提示一次
 - 所有 admin 端点强制 `ENV_ADMIN_SECRET`，无效一律 404
 - bot 默认忽略群聊与 `message` 之外的所有更新类型
 - 管理命令必须 reply 一条转发消息才生效，禁止裸 UID 操作
@@ -536,7 +536,7 @@ curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
 其他朋友不能——每个 tenant 在存储内完全隔离（`tenant:{botId}:` 前缀），普通用户的 `/info /pause` 等命令只作用于自己拥有的 bot。但 **host 是超级管理员**：除 `/host_*` 命令外，host 的普通管理命令也能作用于任意 tenant（毕竟 host 持有 master key 与部署账号，这不是额外的信任让步）。消息内容任何人都看不到——它不持久化保存。
 
 **Q: Cloudflare 免费档够用吗？**（Cloudflare 轨）
-小规模够。Workers 免费 10 万请求/天；KV 免费 **1000 写入/天（全平台共享，00:00 UTC 重置）**。每条送达的访客消息约 3 次 KV 写入（被拉黑/超限/垃圾消息不消耗写入）。注意：**超出免费额度后当日的 KV 写入会直接失败**，表现为消息静默丢失，而不是"略微超支"。10 个朋友 × 每天 50 条 ≈ 1500 写已明显超出——这种量级请开 Workers Paid（$5/月，1M 写/月），或者切到 Docker 轨（SQLite 没有写入配额）。
+小规模够。Workers 免费 10 万请求/天；KV 免费 **1000 写入/天（全平台共享，00:00 UTC 重置）**。每条送达的访客消息约 3 次 KV 写入（被拉黑与垃圾消息不消耗写入；超限的访客每个 60 秒窗口只多 1 次写，用来记住提示已发过）。注意：**超出免费额度后当日的 KV 写入会直接失败**，表现为消息静默丢失，而不是"略微超支"。10 个朋友 × 每天 50 条 ≈ 1500 写已明显超出——这种量级请开 Workers Paid（$5/月，1M 写/月），或者切到 Docker 轨（SQLite 没有写入配额）。
 
 **Q: 一台多大的机器够用？**（Docker 轨）
 1 vCPU / 512 MB RAM / 5 GB 磁盘的小 VPS 跑十几个 tenant bot 完全够。SQLite 单写者足够应付个人/小团队规模；如果你预期同时有几百号活跃 tenant 高并发写，那应该考虑切到 Redis/Postgres，不过那时你也不该用这套架构了。
@@ -548,7 +548,7 @@ curl "https://api.telegram.org/bot<旧 bot token>/deleteWebhook"
 Cloudflare 轨：创建 `.dev.vars`（已 gitignore）镜像必填 secret，然后 `npm run dev:worker`。Node 轨：`cp .env.example .env` 填好后 `npm run dev`（tsx watch 模式，文件变了自动重启），SQLite 数据库默认建在 `./data/db.sqlite`，可以删了重来。要本地接通 Telegram webhook 测试，用 ngrok / cloudflared tunnel 暴露到公网，把 `ENV_PUBLIC_BASE_URL` 改成 tunnel URL。
 
 **Q: 为什么访客在 60s 内连发多条只看到前 5 条到达？**
-限速保护：每访客每 60s 最多 5 条。超出的会被静默丢弃，访客不会收到任何提示（避免给攻击者反馈）。相册（media group）整组只计 1 条额度，2-10 张的相册会完整送达。
+限速保护：每访客每 60s 最多 5 条。超出的会被丢弃，访客在每个窗口里只收到一次「发送过于频繁，请稍后再试」，提示里没有阈值和窗口长度（不给刷量者可用的反馈）。相册（media group）整组只计 1 条额度，2-10 张的相册会完整送达。
 
 ---
 

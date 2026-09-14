@@ -413,6 +413,10 @@ export const T = {
       (id: string) => `Your chat id: ${id}`,
       (id: string) => `Your chat id: ${id}`,
     ),
+    rateLimited: bil(
+      () => '发送过于频繁，请稍后再试。',
+      () => 'Too many messages; please try again later.',
+    ),
     help: bil(
       (isAdmin: boolean) => {
         if (isAdmin) {

@@ -170,8 +170,9 @@ async function processTenantUpdate(
     if (update.message.chat.type !== 'private') return;
     const skv = new ScopedKV(env.nfd, `tenant:${tenant.botId}:`);
     if (await seenUpdate(skv, update.update_id)) return;
-    // The matching markUpdateSeen happens inside the relay, after the cheap drop
-    // decisions (blocked / rate-limited), so dropped junk costs no KV writes.
+    // The matching markUpdateSeen happens inside the relay, after the cheap drop decisions
+    // (blocked / rate-limited), so dropped junk costs no KV writes beyond the rate limiter's
+    // one notice mark per window.
     await handleTenantMessage(tenant, skv, host.debug, update.message, update.update_id);
   } catch (e) {
     logError('tenant_update', e, { botId: tenant.botId });

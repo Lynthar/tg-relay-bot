@@ -122,10 +122,10 @@ Generate keys with `openssl rand -base64 32` and `openssl rand -hex 32`.
 - **It protects you first — the person behind the bot; visitors get basic
   protection.** The visitor always sees the bot as the sender: replies are copied,
   not forwarded, with no sender header; a mistyped slash command never reaches
-  the visitor; blocked and rate-limited visitors get no feedback. Your UID never
-  appears in the clear in storage or logs (encrypted in the record, hashed in
-  keys and logs) — someone with only a storage dump learns which bots are hosted
-  here, not who runs them.
+  the visitor; blocked visitors get no feedback, rate-limited ones a single "try
+  again later" per window. Your UID never appears in the clear in storage or
+  logs (encrypted in the record, hashed in keys and logs) — someone with only a
+  storage dump learns which bots are hosted here, not who runs them.
 - **Out of its hands:** Telegram knows which account created the bot; the hours
   you reply at give away your schedule; the bot's name, avatar and description
   are yours to set, so don't reuse your own; what you write in a reply is only

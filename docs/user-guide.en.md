@@ -460,14 +460,14 @@ Just want to take everything offline temporarily (no data loss)? `/pause` each t
 
 The operator — the person behind the bot — is protected first; guests get basic protection.
 
-- The guest always sees the bot as the sender: replies go out via copyMessage with no forward header and no sender; an admin's unrecognised slash command is intercepted and never reaches the guest; blocked and rate-limited guests get no feedback at all, so there is no channel to probe
+- The guest always sees the bot as the sender: replies go out via copyMessage with no forward header and no sender; an admin's unrecognised slash command is intercepted and never reaches the guest; blocked guests get no feedback at all, and a rate-limited guest gets one "try again later" per window with no threshold or window length in it, so a flooder learns nothing useful
 - Content that would identify the operator — contacts, locations, venues, files with metadata — is delivered but flagged, and can be `/recall`ed within 48 hours
 - Storage holds no operator identity: owner and admin UIDs are stored AES-GCM encrypted, and the msg-map, album-tag, recall, invite-list and onboarding-state keys carry an HMAC of the UID rather than the UID; `ENV_DEBUG=1` event logs record the same hashes. Someone with only a storage dump or a log learns which bots this deployment hosts, not who runs them (deployments upgraded from older versions must run `/host_migrate` once)
 - Guest chatIds are stored as HMAC-SHA256 hashes (`userKey`); a storage dump reveals no chatId plaintext (the exceptions are the reply-routing msg-map and the recall pointers, which expire after 30 days and 48 hours)
 - Every tenant's token, webhook secret, and hashSecret are AES-GCM encrypted at rest — a storage dump alone (without `ENV_MASTER_ENC_KEY`) cannot brute-force userKeys offline
 - Webhook auth relies on a per-tenant random `secret_token` header (constant-time compared, thwarting side channels), not path secrecy — the botId in the path is public information; a missing or wrong secret gets a uniform 404, unusable for probing whether a bot is hosted here
 - Telegram's webhook retries are deduplicated by `update_id`
-- Per-guest rate limit: max 5 messages per 60s; excess silently dropped
+- Per-guest rate limit: max 5 messages per 60s; excess dropped, with one notice per window
 - All admin endpoints require `ENV_ADMIN_SECRET`; invalid → 404
 - Bot ignores group chats and all update types other than `message` by default
 - Admin commands require replying to a forwarded message; naked UID operations are forbidden
@@ -538,7 +538,7 @@ A: In the manager bot, `/info <their_bot>` → check `status`; if paused, `/resu
 A: Other friends cannot — tenants are isolated by key prefix (`tenant:{botId}:`), and a regular user's `/info /pause /...` only reach bots they own. The **host, however, is the super-admin**: besides the `/host_*` commands, the host's regular management commands also work on any tenant (the host already holds the master key and the deployment account, so this concedes no extra trust). Message contents are visible to no one — they are not persisted.
 
 **Q: Is Cloudflare's free tier enough?** (Cloudflare track)
-A: For small scale, yes. Workers free: 100k requests/day; KV free: **1k writes/day (shared platform-wide, resets 00:00 UTC)**. Each delivered guest message costs ~3 KV writes (blocked / rate-limited / junk messages cost none). Beware: **once the daily free quota is exhausted, further KV writes fail outright** — messages are silently lost, not "slightly over budget". 10 friends × 50 messages/day ≈ 1500 writes clearly exceeds it — at that scale use Workers Paid ($5/month, 1M writes/month), or switch to the Docker track (SQLite has no write quota).
+A: For small scale, yes. Workers free: 100k requests/day; KV free: **1k writes/day (shared platform-wide, resets 00:00 UTC)**. Each delivered guest message costs ~3 KV writes (blocked and junk messages cost none; a rate-limited guest costs one extra write per 60-second window, which records that the notice went out). Beware: **once the daily free quota is exhausted, further KV writes fail outright** — messages are silently lost, not "slightly over budget". 10 friends × 50 messages/day ≈ 1500 writes clearly exceeds it — at that scale use Workers Paid ($5/month, 1M writes/month), or switch to the Docker track (SQLite has no write quota).
 
 **Q: How big a machine do I need?** (Docker track)
 A: 1 vCPU / 512 MB RAM / 5 GB disk is enough for a dozen tenant bots. SQLite's single-writer model handles personal/small-team load fine; if you ever expect hundreds of concurrently-active tenants you should switch to Redis/Postgres — but at that point this whole architecture is the wrong shape anyway.
@@ -550,7 +550,7 @@ A: Business code and key layout are identical, but there is no automated data mo
 A: Cloudflare track: create `.dev.vars` (gitignored) mirroring the required secrets, then `npm run dev:worker`. Node track: `cp .env.example .env`, fill it in, then `npm run dev` (tsx watch, auto-restarts on file change); the SQLite db defaults to `./data/db.sqlite` — wipe and recreate freely. To exercise real webhooks locally, expose the port via ngrok / cloudflared tunnel and set `ENV_PUBLIC_BASE_URL` to the tunnel URL.
 
 **Q: Why does a guest who sends 6+ messages within 60 seconds only see the first 5 reach the admin?**
-A: Rate limiting. Per-guest cap is 5 per 60s; excess is silently dropped (no feedback to attackers). A media group (album) counts as a single unit, so a 2–10 item album arrives whole.
+A: Rate limiting. Per-guest cap is 5 per 60s; excess is dropped, and the guest gets a single "Too many messages; please try again later." per window — no threshold or window length in it, so a flooder gains nothing from it. A media group (album) counts as a single unit, so a 2–10 item album arrives whole.
 
 ---
 
