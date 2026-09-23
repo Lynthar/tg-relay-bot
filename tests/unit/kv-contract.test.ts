@@ -202,10 +202,9 @@ describe.each(backends)('KvStore contract (%s)', (_name, makeKv) => {
 
   it('msg-map round-trips through ScopedKV', async () => {
     const s = new ScopedKV(makeKv(), 'tenant:7:');
-    await putMsgMap(s, '42', 9999, { chatId: 100, userKey: 'uk-test', createdAt: 1234 }, 60);
+    await putMsgMap(s, '42', 9999, { chatId: 100, createdAt: 1234 }, 60);
     expect(await getMsgMap(s, '42', 9999)).toEqual({
       chatId: 100,
-      userKey: 'uk-test',
       createdAt: 1234,
     });
   });

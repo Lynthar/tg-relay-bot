@@ -2,7 +2,7 @@ import { buildApp } from '../src/index';
 import { UID_HASH_PURPOSE, parseHostConfig, type Env } from '../src/config';
 import { deriveSecret, encrypt, getEncKey } from '../src/crypto';
 import { MemoryKvStore } from '../src/kv/memory';
-import { operatorKey } from '../src/security';
+import { keyedHash } from '../src/security';
 import {
   createTenant,
   getStored,
@@ -126,7 +126,7 @@ export async function setTenantAdmins(botId: string, adminUids: string[]): Promi
 
 // The hashed form of a UID as it appears in manager-level keys (allow-, user-state-).
 export async function hostUidKey(uid: number | string): Promise<string> {
-  return operatorKey(uid, await deriveSecret(env.ENV_MASTER_ENC_KEY, UID_HASH_PURPOSE));
+  return keyedHash(String(uid), await deriveSecret(env.ENV_MASTER_ENC_KEY, UID_HASH_PURPOSE));
 }
 
 let nextId = 1_000_000;

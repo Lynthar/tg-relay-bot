@@ -15,9 +15,11 @@ import {
   clearBlocked,
   getBlock,
   isBlocked,
+  legacyOperatorKey,
   logError,
   logEvent,
   operatorKey,
+  userKey,
 } from './security';
 import type { TgMessage } from './types';
 import type { TenantCfg } from './tenant';
@@ -227,9 +229,6 @@ async function handleStatus(cfg: TenantCfg, skv: ScopedKV, message: TgMessage): 
   await tg.sendMessage(cfg.botToken, { chat_id: message.chat.id, text });
 }
 
-// Legacy fallback: entries written before msg-map keys gained the admin dimension are only
-// unambiguous when the tenant has a single admin (one chat cannot collide with itself).
-// For multi-admin tenants a legacy hit may belong to another admin's chat — treat as missing.
 async function lookupEntry(
   cfg: TenantCfg,
   skv: ScopedKV,
@@ -239,10 +238,14 @@ async function lookupEntry(
   const adminKey = await operatorKey(adminChatId, cfg.hashSecret);
   const entry = await getMsgMap(skv, adminKey, replyMessageId);
   if (entry) return entry;
-  // Entries written before admin ids were hashed in keys still carry the raw UID; they age
-  // out with MSG_MAP_TTL_SEC after the upgrade, then this lookup can go.
-  const rawKeyed = await getMsgMap(skv, adminChatId, replyMessageId);
-  if (rawKeyed || cfg.adminUids.size !== 1) return rawKeyed;
+  // Read-only fallbacks for older key formats, newest first. Delete them together with
+  // handleRecall's once every deployment has run this code for MSG_MAP_TTL_SEC.
+  const oldAdminKey = await legacyOperatorKey(adminChatId, cfg.hashSecret);
+  const older =
+    (await getMsgMap(skv, oldAdminKey, replyMessageId)) ??
+    (await getMsgMap(skv, adminChatId, replyMessageId));
+  // A key without the admin dimension is only unambiguous with a single admin.
+  if (older || cfg.adminUids.size !== 1) return older;
   return getLegacyMsgMap(skv, replyMessageId);
 }
 
@@ -278,21 +281,22 @@ async function handleAdminReply(
       });
       return;
     }
+    const uk = await userKey(entry.chatId, cfg.hashSecret);
     // Blocklist access is fail-loud, but the admin only ever sees the reply: a storage
     // failure must reach them as "did not take effect", not as silence.
     let text: string;
     try {
       if (action.cmd === 'block') {
         const block = toBlockEntry(action.request);
-        await setBlocked(skv, entry.userKey, block);
-        logEvent(debug, 'block_set', { uk: entry.userKey });
-        text = T.commands.blocked[locale](entry.userKey, block);
+        await setBlocked(skv, uk, block);
+        logEvent(debug, 'block_set', { uk });
+        text = T.commands.blocked[locale](uk, block);
       } else if (action.cmd === 'unblock') {
-        await clearBlocked(skv, entry.userKey);
-        logEvent(debug, 'block_clear', { uk: entry.userKey });
-        text = T.commands.unblocked[locale](entry.userKey);
+        await clearBlocked(skv, uk);
+        logEvent(debug, 'block_clear', { uk });
+        text = T.commands.unblocked[locale](uk);
       } else {
-        text = T.commands.checkBlock[locale](entry.userKey, await getBlock(skv, entry.userKey));
+        text = T.commands.checkBlock[locale](uk, await getBlock(skv, uk));
       }
     } catch (e) {
       logError(`admin_${action.cmd}`, e);
@@ -357,8 +361,13 @@ async function handleRecall(
   noticeMessageId: number,
   locale: Locale,
 ): Promise<void> {
-  const adminKey = await operatorKey(message.chat.id, cfg.hashSecret);
-  const target = await getRecall(skv, adminKey, noticeMessageId);
+  let adminKey = await operatorKey(message.chat.id, cfg.hashSecret);
+  let target = await getRecall(skv, adminKey, noticeMessageId);
+  if (!target) {
+    // Read-only fallback for pointers under the older operator key; goes with lookupEntry's.
+    adminKey = await legacyOperatorKey(message.chat.id, cfg.hashSecret);
+    target = await getRecall(skv, adminKey, noticeMessageId);
+  }
   let text: string;
   if (!target) {
     text = T.commands.recallNothing[locale]();

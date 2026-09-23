@@ -71,9 +71,10 @@ export class ScopedKV {
   }
 }
 
+// No hash rides along with the chatId: a row pairing a UID with a hash lets a dump join that UID
+// to every key built from the hash. Readers derive userKey from chatId (older rows also carry it).
 export interface MsgMapEntry {
   chatId: number | string;
-  userKey: string;
   createdAt: number;
 }
 

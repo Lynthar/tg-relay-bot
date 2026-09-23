@@ -25,7 +25,7 @@ import {
   type StoredEntry,
 } from './tenant';
 import type { TgMessage, DisplayMode } from './types';
-import { logError, logEvent, operatorKey } from './security';
+import { keyedHash, logError, logEvent } from './security';
 import type { KvStore } from './storage';
 import { type Locale, localeFromMessage, T } from './i18n';
 
@@ -43,7 +43,7 @@ function hostHashSecret(host: HostConfig): Promise<string> {
 }
 
 async function hostUidKey(host: HostConfig, uid: string): Promise<string> {
-  return operatorKey(uid, await hostHashSecret(host));
+  return keyedHash(uid, await hostHashSecret(host));
 }
 
 async function getState(kv: KvStore, host: HostConfig, uid: string): Promise<UserState> {

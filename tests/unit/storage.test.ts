@@ -61,10 +61,9 @@ describe('ScopedKV', () => {
 describe('msg-map CRUD', () => {
   it('put / get round trip', async () => {
     const k = fresh();
-    await putMsgMap(k, '777', 42, { chatId: 100, userKey: 'abc', createdAt: 12345 }, 3600);
+    await putMsgMap(k, '777', 42, { chatId: 100, createdAt: 12345 }, 3600);
     expect(await getMsgMap(k, '777', 42)).toEqual({
       chatId: 100,
-      userKey: 'abc',
       createdAt: 12345,
     });
   });
@@ -76,8 +75,8 @@ describe('msg-map CRUD', () => {
 
   it('same message_id under different admins does not collide', async () => {
     const k = fresh();
-    await putMsgMap(k, '111', 500, { chatId: 1, userKey: 'uk-x', createdAt: 1 }, 3600);
-    await putMsgMap(k, '222', 500, { chatId: 2, userKey: 'uk-y', createdAt: 2 }, 3600);
+    await putMsgMap(k, '111', 500, { chatId: 1, createdAt: 1 }, 3600);
+    await putMsgMap(k, '222', 500, { chatId: 2, createdAt: 2 }, 3600);
     expect((await getMsgMap(k, '111', 500))?.chatId).toBe(1);
     expect((await getMsgMap(k, '222', 500))?.chatId).toBe(2);
   });

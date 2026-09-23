@@ -18,18 +18,28 @@ async function getHmacKey(secret: string): Promise<CryptoKey> {
   return key;
 }
 
-export async function userKey(chatId: number | string, hashSecret: string): Promise<string> {
-  const key = await getHmacKey(hashSecret);
-  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(String(chatId)));
+// HMAC-SHA256 of `value` under `secret`, truncated to 32 hex chars.
+export async function keyedHash(value: string, secret: string): Promise<string> {
+  const key = await getHmacKey(secret);
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(value));
   return [...new Uint8Array(sig)]
     .slice(0, 16)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 }
 
-// Same construction as userKey, applied to an owner/admin UID: storage keys and debug logs
-// carry this instead of the UID, so a dump cannot map a bot to the person running it.
+export function userKey(chatId: number | string, hashSecret: string): Promise<string> {
+  return keyedHash(String(chatId), hashSecret);
+}
+
+// Storage keys and debug logs carry this instead of an owner/admin UID. It must never equal the
+// same person's userKey: a dump could then join an operator key to a guest row holding their UID.
 export function operatorKey(uid: number | string, hashSecret: string): Promise<string> {
+  return keyedHash(`operator:${uid}`, hashSecret);
+}
+
+// The operator key older versions wrote (equal to userKey). Read-only: never write under it.
+export function legacyOperatorKey(uid: number | string, hashSecret: string): Promise<string> {
   return userKey(uid, hashSecret);
 }
 

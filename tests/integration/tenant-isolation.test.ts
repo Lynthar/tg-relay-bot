@@ -46,7 +46,7 @@ describe('tenant isolation', () => {
     const skvA = new ScopedKV(env.nfd, `tenant:${a.botId}:`);
     const skvB = new ScopedKV(env.nfd, `tenant:${b.botId}:`);
 
-    await putMsgMap(skvA, '900', 4242, { chatId: 999, userKey: 'uk-a', createdAt: Date.now() }, 60);
+    await putMsgMap(skvA, '900', 4242, { chatId: 999, createdAt: Date.now() }, 60);
 
     expect(await getMsgMap(skvA, '900', 4242)).not.toBeNull();
     expect(await getMsgMap(skvB, '900', 4242)).toBeNull();

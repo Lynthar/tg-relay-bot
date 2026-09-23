@@ -119,11 +119,7 @@ async function relayToAdmins(
   message: TgMessage,
   uk: string,
 ): Promise<void> {
-  const entry: MsgMapEntry = {
-    chatId: message.chat.id,
-    userKey: uk,
-    createdAt: Date.now(),
-  };
+  const entry: MsgMapEntry = { chatId: message.chat.id, createdAt: Date.now() };
 
   for (const adminId of cfg.adminUids) {
     const adminKey = await operatorKey(adminId, cfg.hashSecret);
