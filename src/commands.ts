@@ -23,8 +23,15 @@ import type { TgMessage } from './types';
 import type { TenantCfg } from './tenant';
 import { type ExposureKind, type Locale, T, blockDetail } from './i18n';
 
+// A parsed /block. The duration stays relative until the write: counting it from parse time lets
+// the forward lookup eat into it and push a 1-minute block under the store's 60 s TTL floor.
+interface BlockRequest {
+  durationMs?: number;
+  reason?: string;
+}
+
 type ReplyAction =
-  | { cmd: 'block'; entry: BlockEntry }
+  | { cmd: 'block'; request: BlockRequest }
   | { cmd: 'unblock' | 'checkblock' | 'recall' };
 
 export async function handleAdminMessage(
@@ -52,15 +59,15 @@ export async function handleAdminMessage(
   }
   let action: ReplyAction | null;
   if (parsed?.cmd === 'block') {
-    const entry = parseBlockArgs(parsed.args);
-    if (!entry) {
+    const request = parseBlockArgs(parsed.args);
+    if (!request) {
       await tg.sendMessage(cfg.botToken, {
         chat_id: message.chat.id,
         text: T.commands.blockUsage[locale](),
       });
       return;
     }
-    action = { cmd: 'block', entry };
+    action = { cmd: 'block', request };
   } else {
     action = asReplyAction(parsed);
   }
@@ -94,8 +101,8 @@ const DURATION_MS: Record<string, number> = {
 // "/block [<n>m|h|d|w] [reason]". A first word that starts with a digit must be a duration:
 // a mistyped one ("7 days", "7x") is refused rather than becoming a permanent block whose
 // reason is the typo. Returns null when the arguments are unusable.
-function parseBlockArgs(args: string): BlockEntry | null {
-  const entry: BlockEntry = {};
+function parseBlockArgs(args: string): BlockRequest | null {
+  const request: BlockRequest = {};
   let reason = args;
   const first = args.split(/\s/, 1)[0];
   if (/^\d/.test(first)) {
@@ -103,10 +110,18 @@ function parseBlockArgs(args: string): BlockEntry | null {
     if (!m) return null;
     const ms = Number(m[1]) * DURATION_MS[m[2].toLowerCase()];
     if (ms === 0 || ms > BLOCK_MAX_DURATION_DAYS * DURATION_MS.d) return null;
-    entry.until = Date.now() + ms;
+    request.durationMs = ms;
     reason = args.slice(first.length).trim();
   }
   if (reason.length > BLOCK_REASON_MAX_CHARS) return null;
+  if (reason) request.reason = reason;
+  return request;
+}
+
+// Call immediately before setBlocked: `until` is anchored to the moment of writing.
+function toBlockEntry({ durationMs, reason }: BlockRequest): BlockEntry {
+  const entry: BlockEntry = {};
+  if (durationMs !== undefined) entry.until = Date.now() + durationMs;
   if (reason) entry.reason = reason;
   return entry;
 }
@@ -268,9 +283,10 @@ async function handleAdminReply(
     let text: string;
     try {
       if (action.cmd === 'block') {
-        await setBlocked(skv, entry.userKey, action.entry);
+        const block = toBlockEntry(action.request);
+        await setBlocked(skv, entry.userKey, block);
         logEvent(debug, 'block_set', { uk: entry.userKey });
-        text = T.commands.blocked[locale](entry.userKey, action.entry);
+        text = T.commands.blocked[locale](entry.userKey, block);
       } else if (action.cmd === 'unblock') {
         await clearBlocked(skv, entry.userKey);
         logEvent(debug, 'block_clear', { uk: entry.userKey });

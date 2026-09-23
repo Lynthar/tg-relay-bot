@@ -918,6 +918,33 @@ describe('timed blocks: /block <duration> [reason]', () => {
     }
   });
 
+  it('a 1-minute block holds its full minute when looking up the forward is slow', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const realGet = env.nfd.get.bind(env.nfd) as (
+      key: string,
+      options?: { type: 'json' },
+    ) => Promise<unknown>;
+    // Reading the forward's mapping costs 1.2 s, as a throttled KV read might.
+    const get = vi.spyOn(env.nfd, 'get').mockImplementation(((
+      key: string,
+      options?: { type: 'json' },
+    ) => {
+      if (key.includes(':msg-map-')) vi.setSystemTime(Date.now() + 1200);
+      return realGet(key, options);
+    }) as typeof env.nfd.get);
+    try {
+      const adminUid = 240003;
+      const { t, skv, uk } = await provisionWithMapping('240003', adminUid);
+      await replyAs(t, adminUid, '/block 1m spam');
+      get.mockRestore();
+      expect(await getBlock(skv, uk)).toEqual({ until: Date.now() + 60_000, reason: 'spam' });
+      expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/^已屏蔽 /);
+    } finally {
+      get.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('/checkblock reports the expiry and reason', async () => {
     const adminUid = 240002;
     const { t, skv, uk } = await provisionWithMapping('240002', adminUid);
