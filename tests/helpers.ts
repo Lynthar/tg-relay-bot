@@ -1,3 +1,4 @@
+import type { ExecutionContext } from 'hono';
 import { buildApp } from '../src/index';
 import { UID_HASH_PURPOSE, parseHostConfig, type Env } from '../src/config';
 import { deriveSecret, encrypt, getEncKey } from '../src/crypto';
@@ -179,13 +180,24 @@ export function webhookUrl(botId: string): string {
   return `${PUBLIC_BASE_URL}/wh/${botId}`;
 }
 
+// Every request runs under this context, so the background work the app hands to
+// waitUntil lands here for flush() to await.
+const background: Promise<unknown>[] = [];
+const executionCtx: ExecutionContext = {
+  waitUntil: (p) => void background.push(p),
+  passThroughOnException: () => {},
+  props: {},
+};
+
 // Lazy singleton — the Hono app captures env + host at construction; rebuilding
 // per test is unnecessary because env is module-shared.
 let appPromise: ReturnType<typeof buildAppFromEnv> | null = null;
 async function buildAppFromEnv(): Promise<{ fetch: (req: Request) => Promise<Response> }> {
   const host = await parseHostConfig(env);
   const app = buildApp({ env, host });
-  return { fetch: (req: Request) => Promise.resolve(app.fetch(req)) };
+  return {
+    fetch: (req: Request) => Promise.resolve(app.fetch(req, undefined, executionCtx)),
+  };
 }
 function getApp(): Promise<{ fetch: (req: Request) => Promise<Response> }> {
   if (!appPromise) appPromise = buildAppFromEnv();
@@ -216,9 +228,10 @@ export async function getWebhook(botId: string): Promise<Response> {
   return callApp(new Request(webhookUrl(botId), { method: 'GET' }));
 }
 
-// Brief sleep so fire-and-forget background work has time to settle before assertions.
-export function flush(ms = 30): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+// Awaits all background work dispatched so far. A timed sleep instead lets a slow
+// handler's reply leak into the next test's tgMock.
+export async function flush(): Promise<void> {
+  while (background.length > 0) await Promise.all(background.splice(0));
 }
 
 // ─── Telegram API mock ───────────────────────────────────────────────────

@@ -2,13 +2,17 @@ import { env, SELF } from 'cloudflare:test';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getEncKey } from '../../src/crypto';
 import { createTenant } from '../../src/tenant';
-import { TgMock, buildUpdate, flush, managerWebhookSecret } from '../helpers';
+import { TgMock, buildUpdate, managerWebhookSecret } from '../helpers';
 
 // Worker-entry smoke only: the business suite runs in plain Node (tests/unit,
 // tests/integration). These cases prove the workerd wiring — entry memoisation,
 // KV binding compatibility, the waitUntil path — against the real runtime.
 
 const tg = new TgMock();
+
+// SELF hands background work to workerd's own waitUntil, which the test cannot
+// await, so it waits instead of calling the helpers' flush().
+const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 30));
 
 beforeAll(() => tg.install());
 beforeEach(() => tg.reset());
@@ -55,7 +59,7 @@ describe('worker entry smoke', () => {
       body: JSON.stringify(buildUpdate({ chatId: 555001, text: '/whoami' })),
     });
     expect(res.status).toBe(200);
-    await flush();
+    await settle();
     const calls = tg.getCallsByMethod('sendMessage');
     expect(calls.some((c) => String(c.body?.chat_id) === '555001')).toBe(true);
   });
@@ -78,7 +82,7 @@ describe('worker entry smoke', () => {
       body: JSON.stringify(buildUpdate({ chatId: 999001, text: 'hello' })),
     });
     expect(res.status).toBe(200);
-    await flush();
+    await settle();
     expect(tg.getCallsByMethod('forwardMessage').length).toBe(1);
   });
 });
