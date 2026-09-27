@@ -5,11 +5,13 @@ import {
   buildUpdate,
   env,
   flush,
+  lastReplyText,
   managerWebhookSecret,
   nid,
   postWebhook,
   provisionLegacyTenant,
   provisionTenant,
+  sendManagerCmd,
   tgMock,
   storedOperators,
   setTenantAdmins,
@@ -21,24 +23,6 @@ import { ScopedKV } from '../../src/storage';
 beforeAll(() => tgMock.install());
 beforeEach(() => tgMock.reset());
 afterAll(() => tgMock.uninstall());
-
-async function sendManagerCmd(
-  senderChatId: number,
-  text: string,
-  languageCode?: string,
-): Promise<Response> {
-  const secret = await managerWebhookSecret();
-  return postWebhook(
-    MANAGER_BOT_ID,
-    secret,
-    buildUpdate({ chatId: senderChatId, text, languageCode }),
-  );
-}
-
-function lastReplyText(): string {
-  const calls = tgMock.getCallsByMethod('sendMessage');
-  return calls.length > 0 ? String(calls[calls.length - 1].body?.text ?? '') : '';
-}
 
 describe('/admins', () => {
   it('list shows current admins with owner tag', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { env } from '../helpers';
+import { env, freshScope } from '../helpers';
 import {
   checkRateLimit,
   clearBlocked,
@@ -12,12 +12,7 @@ import {
   setBlocked,
   userKey,
 } from '../../src/security';
-import { ScopedKV } from '../../src/storage';
 import { TelegramError } from '../../src/telegram';
-
-function freshSkv(): ScopedKV {
-  return new ScopedKV(env.nfd, `test:sec:${crypto.randomUUID()}:`);
-}
 
 describe('userKey', () => {
   it('is deterministic for the same chatId + secret', async () => {
@@ -59,7 +54,7 @@ describe('constantTimeEqual', () => {
 
 describe('checkRateLimit', () => {
   it('admits the first 5; the 6th is the one rejection that carries a notice, later ones do not', async () => {
-    const skv = freshSkv();
+    const skv = freshScope();
     const uk = 'rl-test';
     const results: string[] = [];
     for (let i = 0; i < 8; i++) {
@@ -78,7 +73,7 @@ describe('checkRateLimit', () => {
   });
 
   it('separate userKeys have independent counters', async () => {
-    const skv = freshSkv();
+    const skv = freshScope();
     for (let i = 0; i < 5; i++) {
       expect(await checkRateLimit(skv, 'uk-a', 60, 5)).toBe('admitted');
     }
@@ -87,7 +82,7 @@ describe('checkRateLimit', () => {
   });
 
   it('only the first rejection is persisted (count = max + 1); the flood after it writes nothing', async () => {
-    const skv = freshSkv();
+    const skv = freshScope();
     const put = vi.spyOn(env.nfd, 'put');
     try {
       for (let i = 0; i < 8; i++) await checkRateLimit(skv, 'uk-c', 60, 5);
@@ -102,7 +97,7 @@ describe('checkRateLimit', () => {
   it('a fresh window admits again and carries its own single notice', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
-      const skv = freshSkv();
+      const skv = freshScope();
       for (let i = 0; i < 7; i++) await checkRateLimit(skv, 'uk-d', 60, 5);
       vi.setSystemTime(Date.now() + 61_000);
       expect(await checkRateLimit(skv, 'uk-d', 60, 5)).toBe('admitted');
@@ -117,7 +112,7 @@ describe('checkRateLimit', () => {
 
 describe('blocklist', () => {
   it('set / check / clear round trip', async () => {
-    const skv = freshSkv();
+    const skv = freshScope();
     const uk = 'block-test';
     expect(await isBlocked(skv, uk)).toBe(false);
     await setBlocked(skv, uk);
@@ -128,7 +123,7 @@ describe('blocklist', () => {
   });
 
   it('a value written by the old code ("1") reads as a permanent block with no detail', async () => {
-    const skv = freshSkv();
+    const skv = freshScope();
     await skv.put('block-legacy', '1');
     expect(await getBlock(skv, 'legacy')).toEqual({});
     expect(await isBlocked(skv, 'legacy')).toBe(true);
@@ -137,7 +132,7 @@ describe('blocklist', () => {
   it('a timed block keeps its detail and lifts itself once `until` passes', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
-      const skv = freshSkv();
+      const skv = freshScope();
       const until = Date.now() + 5 * 60_000;
       await setBlocked(skv, 'timed', { reason: 'spam', until });
       expect(await getBlock(skv, 'timed')).toEqual({ reason: 'spam', until });
@@ -153,7 +148,7 @@ describe('blocklist', () => {
   });
 
   it('an expired `until` wins even while the store still serves the value', async () => {
-    const skv = freshSkv();
+    const skv = freshScope();
     await skv.put('block-stale', JSON.stringify({ until: Date.now() - 1 }));
     expect(await getBlock(skv, 'stale')).toBeNull();
     expect(await isBlocked(skv, 'stale')).toBe(false);
@@ -194,14 +189,14 @@ describe('formatError', () => {
 
 describe('update dedup (seenUpdate / markUpdateSeen)', () => {
   it('unseen until marked, seen afterwards', async () => {
-    const skv = freshSkv();
+    const skv = freshScope();
     expect(await seenUpdate(skv, 100)).toBe(false);
     await markUpdateSeen(skv, 100, 60);
     expect(await seenUpdate(skv, 100)).toBe(true);
   });
 
   it('distinct update_ids are independent', async () => {
-    const skv = freshSkv();
+    const skv = freshScope();
     await markUpdateSeen(skv, 1, 60);
     expect(await seenUpdate(skv, 1)).toBe(true);
     expect(await seenUpdate(skv, 2)).toBe(false);

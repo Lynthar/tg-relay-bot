@@ -5,6 +5,7 @@ import {
   env,
   flush,
   getWebhook,
+  lastReplyText,
   nid,
   postWebhook,
   provisionLegacyTenant,
@@ -392,7 +393,7 @@ describe('command parsing: deep-link payloads and @botname suffixes', () => {
     );
     await flush();
     expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(0);
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toBe(
+    expect(lastReplyText()).toBe(
       t.cfg.startMessage,
     );
   });
@@ -418,7 +419,7 @@ describe('command parsing: deep-link payloads and @botname suffixes', () => {
     );
     await flush();
     expect(tgMock.getCallsByMethod('forwardMessage').length).toBe(0);
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/可用命令/);
+    expect(lastReplyText()).toMatch(/可用命令/);
   });
 
   it('a longer command word ("/starting soon") is not mistaken for /start', async () => {
@@ -468,7 +469,7 @@ describe('/blocklist and /unblock <userKey> (no-reply block management)', () => 
       buildUpdate({ chatId: adminUid, fromId: adminUid, text: '/blocklist' }),
     );
     await flush();
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/没有被屏蔽/);
+    expect(lastReplyText()).toMatch(/没有被屏蔽/);
   });
 
   it('/unblock <userKey> clears the block and confirms', async () => {
@@ -485,7 +486,7 @@ describe('/blocklist and /unblock <userKey> (no-reply block management)', () => 
     await flush();
 
     expect(await skv.getString(`block-${UK_A}`)).toBeNull();
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已解除屏蔽/);
+    expect(lastReplyText()).toMatch(/已解除屏蔽/);
   });
 
   it('/unblock <userKey> for a non-blocked key reports not blocked', async () => {
@@ -497,7 +498,7 @@ describe('/blocklist and /unblock <userKey> (no-reply block management)', () => 
       buildUpdate({ chatId: adminUid, fromId: adminUid, text: `/unblock ${UK_B}` }),
     );
     await flush();
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/未被屏蔽/);
+    expect(lastReplyText()).toMatch(/未被屏蔽/);
   });
 
   it('/unblock with a malformed argument shows usage', async () => {
@@ -509,7 +510,7 @@ describe('/blocklist and /unblock <userKey> (no-reply block management)', () => 
       buildUpdate({ chatId: adminUid, fromId: adminUid, text: '/unblock not-a-key' }),
     );
     await flush();
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/用法/);
+    expect(lastReplyText()).toMatch(/用法/);
   });
 
   it('replying to a forward with "/unblock <userKey>" acts as a command, not a guest reply', async () => {
@@ -802,7 +803,7 @@ describe('mistyped admin commands never leak to the guest', () => {
     await replyAs(t, adminUid, '/bloc');
     expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
     expect(await skv.getString(`block-${uk}`)).toBeNull();
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已拦截/);
+    expect(lastReplyText()).toMatch(/已拦截/);
   });
 
   it('/block with a reason blocks with that reason recorded, nothing copied', async () => {
@@ -811,7 +812,7 @@ describe('mistyped admin commands never leak to the guest', () => {
     await replyAs(t, adminUid, '/block 拉黑他');
     expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
     expect(await getBlock(skv, uk)).toEqual({ reason: '拉黑他' });
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toBe(
+    expect(lastReplyText()).toBe(
       `已屏蔽 ${uk}（原因：拉黑他）`,
     );
   });
@@ -832,7 +833,7 @@ describe('mistyped admin commands never leak to the guest', () => {
       buildUpdate({ chatId: adminUid, fromId: adminUid, text: '/oops' }),
     );
     await flush();
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已拦截/);
+    expect(lastReplyText()).toMatch(/已拦截/);
   });
 
   it('guest slash text is still relayed untouched', async () => {
@@ -878,7 +879,7 @@ describe('admin block commands report a storage failure instead of going silent'
     const { t, skv, uk } = await provisionWithMapping('220011', adminUid);
     await replyAs(t, adminUid, '/block');
     expect(await getBlock(skv, uk)).toEqual({});
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toBe(`已屏蔽 ${uk}`);
+    expect(lastReplyText()).toBe(`已屏蔽 ${uk}`);
   });
 });
 
@@ -902,7 +903,7 @@ describe('timed blocks: /block <duration> [reason]', () => {
       expect(entry?.reason).toBe('too many links');
       expect(entry?.until).toBeGreaterThanOrEqual(before + 7 * DAY_MS);
       expect(entry?.until).toBeLessThanOrEqual(Date.now() + 7 * DAY_MS);
-      expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(
+      expect(lastReplyText()).toMatch(
         new RegExp(`^已屏蔽 ${uk}（至 \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d UTC · 原因：too many links）$`),
       );
 
@@ -938,7 +939,7 @@ describe('timed blocks: /block <duration> [reason]', () => {
       await replyAs(t, adminUid, '/block 1m spam');
       get.mockRestore();
       expect(await getBlock(skv, uk)).toEqual({ until: Date.now() + 60_000, reason: 'spam' });
-      expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/^已屏蔽 /);
+      expect(lastReplyText()).toMatch(/^已屏蔽 /);
     } finally {
       get.mockRestore();
       vi.useRealTimers();
@@ -953,7 +954,7 @@ describe('timed blocks: /block <duration> [reason]', () => {
       JSON.stringify({ reason: 'spam', until: Date.UTC(2031, 5, 7, 8, 9) }),
     );
     await replyAs(t, adminUid, '/checkblock');
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toBe(
+    expect(lastReplyText()).toBe(
       `${uk} 已屏蔽（至 2031-06-07 08:09 UTC · 原因：spam）`,
     );
   });
@@ -969,7 +970,7 @@ describe('timed blocks: /block <duration> [reason]', () => {
     await replyAs(t, adminUid, `/block ${args}`);
     expect(await skv.getString(`block-${uk}`)).toBeNull();
     expect(tgMock.getCallsByMethod('copyMessage').length).toBe(0);
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/^用法：\/block/);
+    expect(lastReplyText()).toMatch(/^用法：\/block/);
   });
 });
 
@@ -986,13 +987,15 @@ describe('admin replies that can identify the admin: delivered, noticed, recalla
     const adminUid = 230001;
     const { t, skv } = await provisionWithMapping('230001', adminUid);
     respondWithIds();
-    await replyAs(t, adminUid, '', { extra: { location: { latitude: 1, longitude: 2 } } });
+    const location = { latitude: 1, longitude: 2 };
+    await replyAs(t, adminUid, '', { extra: { message_id: 6006, location } });
 
     expect(tgMock.getCallsByMethod('copyMessage').length).toBe(1);
     const notices = tgMock.getCallsByMethod('sendMessage');
     expect(notices.length).toBe(1);
     expect(String(notices[0]?.body?.text)).toMatch(/已送达.*位置.*\/recall/);
-    expect(notices[0]?.body?.reply_parameters).toBeDefined();
+    // The notice is threaded under the admin's own reply, the message it warns about.
+    expect(notices[0]?.body?.reply_parameters).toEqual({ message_id: 6006 });
     const stored = await skv.getJson<{ chatId: number; messageId: number }>(
       `recall-${await operatorKey(adminUid, t.hashSecret)}-888`,
     );
@@ -1008,7 +1011,7 @@ describe('admin replies that can identify the admin: delivered, noticed, recalla
     const adminUid = 230010 + ['contact', 'venue', 'document', 'audio'].indexOf(_kind);
     const { t } = await provisionWithMapping(String(adminUid), adminUid);
     await replyAs(t, adminUid, '', { extra });
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(re);
+    expect(lastReplyText()).toMatch(re);
   });
 
   it('a plain text reply is copied with no notice and no recall pointer', async () => {
@@ -1031,7 +1034,7 @@ describe('admin replies that can identify the admin: delivered, noticed, recalla
     const del = tgMock.getCallsByMethod('deleteMessage');
     expect(del.length).toBe(1);
     expect(del[0]?.body).toEqual({ chat_id: 48000 + adminUid, message_id: 777 });
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/已从对方那里撤回/);
+    expect(lastReplyText()).toMatch(/已从对方那里撤回/);
     expect(await skv.getJson(`recall-${await operatorKey(adminUid, t.hashSecret)}-888`)).toBeNull();
   });
 
@@ -1040,7 +1043,7 @@ describe('admin replies that can identify the admin: delivered, noticed, recalla
     const { t } = await provisionWithMapping('230004', adminUid);
     await replyAs(t, adminUid, '/recall');
     expect(tgMock.getCallsByMethod('deleteMessage').length).toBe(0);
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/没有可撤回/);
+    expect(lastReplyText()).toMatch(/没有可撤回/);
   });
 
   it('/recall reports the Telegram error when the copy can no longer be deleted', async () => {
@@ -1056,7 +1059,7 @@ describe('admin replies that can identify the admin: delivered, noticed, recalla
     );
 
     await replyAs(t, adminUid, '/recall', { replyToMessageId: 888 });
-    expect(String(tgMock.getCallsByMethod('sendMessage')[0]?.body?.text)).toMatch(/撤回失败/);
+    expect(lastReplyText()).toMatch(/撤回失败/);
     // The pointer stays so the admin can retry if it was a transient failure.
     expect(await skv.getJson(`recall-${await operatorKey(adminUid, t.hashSecret)}-888`)).not.toBeNull();
   });

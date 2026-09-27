@@ -74,9 +74,4 @@ export class MemoryKvStore implements KvStore {
       ...(hasMore ? { cursor: page[page.length - 1] } : {}),
     };
   }
-
-  // Test helper — not part of the KvStore contract.
-  clear(): void {
-    this.store.clear();
-  }
 }

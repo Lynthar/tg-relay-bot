@@ -3,7 +3,9 @@ import { buildApp } from '../src/index';
 import { UID_HASH_PURPOSE, parseHostConfig, type Env } from '../src/config';
 import { deriveSecret, encrypt, getEncKey } from '../src/crypto';
 import { MemoryKvStore } from '../src/kv/memory';
+import { SqliteKvStore } from '../src/kv/sqlite';
 import { keyedHash } from '../src/security';
+import { ScopedKV } from '../src/storage';
 import {
   createTenant,
   getStored,
@@ -31,6 +33,23 @@ export const env: Env = {
   ENV_PUBLIC_BASE_URL: PUBLIC_BASE_URL,
   ENV_ADMIN_SECRET: ADMIN_SECRET,
 };
+
+// A scope on the shared store under a random prefix, so no two callers see each other's keys.
+export function freshScope(): ScopedKV {
+  return new ScopedKV(env.nfd, `test:${crypto.randomUUID()}:`);
+}
+
+// A private SQLite store (`:memory:` is per-connection). Callers must run
+// closeSqliteStores() in afterEach, or every store's connection stays open.
+const sqliteStores: SqliteKvStore[] = [];
+export function freshSqlite(opts: { listLimit?: number } = {}): SqliteKvStore {
+  const s = new SqliteKvStore(':memory:', { cleanupIntervalMs: 0, ...opts });
+  sqliteStores.push(s);
+  return s;
+}
+export function closeSqliteStores(): void {
+  while (sqliteStores.length > 0) sqliteStores.pop()?.close();
+}
 
 let cachedManagerSecret: string | null = null;
 export async function managerWebhookSecret(): Promise<string> {
@@ -228,6 +247,19 @@ export async function getWebhook(botId: string): Promise<Response> {
   return callApp(new Request(webhookUrl(botId), { method: 'GET' }));
 }
 
+export async function sendManagerCmd(
+  senderChatId: number,
+  text: string,
+  languageCode?: string,
+): Promise<Response> {
+  const secret = await managerWebhookSecret();
+  return postWebhook(
+    MANAGER_BOT_ID,
+    secret,
+    buildUpdate({ chatId: senderChatId, text, languageCode }),
+  );
+}
+
 // Awaits all background work dispatched so far. A timed sleep instead lets a slow
 // handler's reply leak into the next test's tgMock.
 export async function flush(): Promise<void> {
@@ -315,3 +347,9 @@ export class TgMock {
 }
 
 export const tgMock = new TgMock();
+
+// Text of the last sendMessage the shared mock saw, or '' if there was none.
+export function lastReplyText(): string {
+  const calls = tgMock.getCallsByMethod('sendMessage');
+  return calls.length > 0 ? String(calls[calls.length - 1].body?.text ?? '') : '';
+}

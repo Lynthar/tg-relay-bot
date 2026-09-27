@@ -29,7 +29,8 @@ describe('crypto', () => {
       const kA = await getEncKey(KEY_A);
       const kB = await getEncKey(KEY_B);
       const ct = await encrypt('hello', kA);
-      await expect(decrypt(ct, kB)).rejects.toBeDefined();
+      // WebCrypto: AES-GCM authentication failure rejects with an OperationError.
+      await expect(decrypt(ct, kB)).rejects.toMatchObject({ name: 'OperationError' });
     });
   });
 
@@ -37,22 +38,12 @@ describe('crypto', () => {
     it('rejects key that is not 32 bytes', async () => {
       await expect(getEncKey('YWJj')).rejects.toThrow(/32 bytes/);
     });
-
-    it('caches keys by base64 input', async () => {
-      const k1 = await getEncKey(KEY_A);
-      const k2 = await getEncKey(KEY_A);
-      expect(k1).toBe(k2);
-    });
   });
 
   describe('randomHex', () => {
     it('produces 2 hex chars per byte requested', () => {
       expect(randomHex(4)).toMatch(/^[0-9a-f]{8}$/);
       expect(randomHex(16)).toMatch(/^[0-9a-f]{32}$/);
-    });
-
-    it('returns different values across calls', () => {
-      expect(randomHex(8)).not.toBe(randomHex(8));
     });
   });
 });

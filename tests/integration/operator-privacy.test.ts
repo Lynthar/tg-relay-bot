@@ -1,12 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
-  MANAGER_BOT_ID,
   buildUpdate,
   env,
   flush,
-  managerWebhookSecret,
   postWebhook,
   provisionTenant,
+  sendManagerCmd,
   storedOperators,
   tgMock,
   type ProvisionedTenant,
@@ -75,8 +74,7 @@ async function guestSays(t: ProvisionedTenant, uid: number): Promise<void> {
 }
 
 async function ownerRuns(owner: number, text: string): Promise<void> {
-  const secret = await managerWebhookSecret();
-  await postWebhook(MANAGER_BOT_ID, secret, buildUpdate({ chatId: owner, text }));
+  await sendManagerCmd(owner, text);
   await flush();
 }
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { closeSqliteStores, freshSqlite } from '../helpers';
 import { MemoryKvStore } from '../../src/kv/memory';
-import { SqliteKvStore } from '../../src/kv/sqlite';
 import {
   MIN_EXPIRATION_TTL_SEC,
   ScopedKV,
@@ -14,25 +14,14 @@ import {
 // (SQLite's cleanup() and close()) stays in kv-sqlite.test.ts.
 type MakeKv = (opts?: { listLimit?: number }) => KvStore;
 
-const openStores: SqliteKvStore[] = [];
-
 afterEach(() => {
   vi.useRealTimers();
-  while (openStores.length > 0) openStores.pop()?.close();
+  closeSqliteStores();
 });
 
 const backends: [string, MakeKv][] = [
   ['memory', (opts = {}) => new MemoryKvStore(opts)],
-  [
-    'sqlite',
-    (opts = {}) => {
-      // Each store gets its own private in-memory database; `:memory:` is per-connection,
-      // so two stores cannot see each other's writes.
-      const s = new SqliteKvStore(':memory:', { cleanupIntervalMs: 0, ...opts });
-      openStores.push(s);
-      return s;
-    },
-  ],
+  ['sqlite', freshSqlite],
 ];
 
 // Advances the mocked clock past a TTL written with the minimum legal value.

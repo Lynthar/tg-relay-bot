@@ -1,28 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { closeSqliteStores, freshSqlite } from '../helpers';
 import { SqliteKvStore } from '../../src/kv/sqlite';
 import { MIN_EXPIRATION_TTL_SEC } from '../../src/storage';
 
 // Behaviour shared with the other backend is in kv-contract.test.ts, which runs the same
 // table against both. Only what SQLite alone offers belongs here.
-const stores: SqliteKvStore[] = [];
-
 afterEach(() => {
   vi.useRealTimers();
-  while (stores.length > 0) stores.pop()?.close();
+  closeSqliteStores();
 });
-
-function fresh(): SqliteKvStore {
-  // Each store gets its own private in-memory database; `:memory:` is
-  // per-connection, so they cannot see each other's writes.
-  const s = new SqliteKvStore(':memory:', { cleanupIntervalMs: 0 });
-  stores.push(s);
-  return s;
-}
 
 describe('SqliteKvStore specifics', () => {
   it('cleanup() purges every expired row and returns the count', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
-    const kv = fresh();
+    const kv = freshSqlite();
     await kv.put('x1', 'v', { expirationTtl: MIN_EXPIRATION_TTL_SEC });
     await kv.put('x2', 'v', { expirationTtl: MIN_EXPIRATION_TTL_SEC });
     await kv.put('keep', 'v');
@@ -35,6 +26,7 @@ describe('SqliteKvStore specifics', () => {
     const kv = new SqliteKvStore(':memory:', { cleanupIntervalMs: 0 });
     await kv.put('k', 'v');
     kv.close();
-    await expect(kv.get('k')).rejects.toBeDefined();
+    // better-sqlite3's error for any statement run on a closed connection.
+    await expect(kv.get('k')).rejects.toThrow('The database connection is not open');
   });
 });
