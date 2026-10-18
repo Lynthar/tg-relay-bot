@@ -17,7 +17,6 @@ README 只讲这个项目是什么。这份文档是完整参考：怎么用、�
 - [隐私与安全模型](#隐私与安全模型)
 - [数据保留](#数据保留)
 - [常见问题](#常见问题)
-- [开发](#开发)
 
 ---
 
@@ -549,33 +548,3 @@ Cloudflare 轨：创建 `.dev.vars`（已 gitignore）镜像必填 secret，然�
 
 **Q: 为什么访客在 60s 内连发多条只看到前 5 条到达？**
 限速保护：每访客每 60s 最多 5 条。超出的会被丢弃，访客在每个窗口里只收到一次「发送过于频繁，请稍后再试」，提示里没有阈值和窗口长度（不给刷量者可用的反馈）。相册（media group）整组只计 1 条额度，2-10 张的相册会完整送达。
-
----
-
----
-
-## 开发
-
-```bash
-npm install           # 装依赖（含 better-sqlite3 原生构建）
-npm run typecheck     # tsc 类型检查（Node 与 Worker 两套 tsconfig 各查一遍）
-npm test              # 主测试套件（纯 Node + 内存存储，本地全离线）
-npm run test:worker   # Worker 入口冒烟测试（workers-pool，真 workerd 运行时）
-npm run test:watch    # 主套件 watch 模式
-npm run dev           # Node 轨本地开发：tsx watch src/server.ts
-npm run dev:worker    # Cloudflare 轨本地开发：wrangler dev
-npm run deploy        # 部署到 Cloudflare
-```
-
-测试位于 `tests/unit/`（KV 实现 / crypto / security / storage）、`tests/integration/`（webhook 路由、tenant 隔离、manager 命令）和 `tests/worker/`（Worker 入口冒烟）。集成测试通过 `app.fetch(new Request(...))` 直接驱动 Hono app，无需起 HTTP server。
-
-容器内部行为同样可以本地复现：
-
-```bash
-docker compose build       # 构建镜像（首次约 1-2 分钟）
-docker compose up -d       # 启动
-docker compose logs -f bot # 跟日志
-docker compose down        # 停（不删 data/）
-```
-
----

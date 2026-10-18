@@ -17,7 +17,6 @@ The project supports two deployment shapes: **Cloudflare Workers** (free tier, z
 - [Privacy & security model](#privacy--security-model)
 - [Data retention](#data-retention)
 - [FAQ](#faq)
-- [Development](#development)
 
 ---
 
@@ -551,33 +550,3 @@ A: Cloudflare track: create `.dev.vars` (gitignored) mirroring the required secr
 
 **Q: Why does a guest who sends 6+ messages within 60 seconds only see the first 5 reach the admin?**
 A: Rate limiting. Per-guest cap is 5 per 60s; excess is dropped, and the guest gets a single "Too many messages; please try again later." per window — no threshold or window length in it, so a flooder gains nothing from it. A media group (album) counts as a single unit, so a 2–10 item album arrives whole.
-
----
-
----
-
-## Development
-
-```bash
-npm install           # install dependencies (incl. better-sqlite3 native build)
-npm run typecheck     # tsc type check (runs both the Node and the Worker tsconfig)
-npm test              # main test suite (plain Node + in-memory store, fully offline)
-npm run test:worker   # Worker entry smoke tests (workers-pool, real workerd runtime)
-npm run test:watch    # main suite in watch mode
-npm run dev           # Node-track local dev: tsx watch src/server.ts
-npm run dev:worker    # Cloudflare-track local dev: wrangler dev
-npm run deploy        # deploy to Cloudflare
-```
-
-Tests live under `tests/unit/` (KV backends, crypto, security, storage), `tests/integration/` (webhook routing, tenant isolation, manager commands), and `tests/worker/` (Worker entry smoke). Integration tests drive the Hono app directly via `app.fetch(new Request(...))` — no HTTP server needed.
-
-The container-side behavior can be reproduced locally too:
-
-```bash
-docker compose build       # build image (~1–2 min first time)
-docker compose up -d       # start
-docker compose logs -f bot # follow logs
-docker compose down        # stop (keeps ./data)
-```
-
----
