@@ -28,7 +28,7 @@ npx wrangler login
 npx wrangler kv namespace create nfd
 ```
 
-把返回的 id 填进 `wrangler.toml`（**仓库里那个现成的 id 是别人的，必须换掉**），
+把返回的 id 填进 `wrangler.toml`，替换掉占位符 `REPLACE_WITH_YOUR_KV_NAMESPACE_ID`，
 在 `[vars]` 里设 `ENV_PUBLIC_BASE_URL`，然后：
 
 ```bash
@@ -45,6 +45,8 @@ npx wrangler deploy
 git clone https://github.com/Lynthar/tg-relay-bot.git
 cd tg-relay-bot
 cp .env.example .env
+mkdir -p data
+sudo chown 10001:10001 data
 docker compose up -d
 ```
 

@@ -112,8 +112,8 @@ npx wrangler login
 # 3. 创建 KV namespace
 npx wrangler kv namespace create nfd
 # 把返回的 id 填进 wrangler.toml 里的 id = "..."
-# ⚠️ 仓库里现有的 id 是上一任 host 的；不替换的话部署会报
-#    "KV namespace not found"（若恰好在同一 Cloudflare 账号下则会误绑旧数据）
+# ⚠️ 仓库里是占位符 REPLACE_WITH_YOUR_KV_NAMESPACE_ID；不替换的话
+#    部署会报 "KV namespace not found"
 
 # 4. 在 wrangler.toml 里加上对外 URL（部署后是 https://tg-relay-bot.<你的子域>.workers.dev，
 #    绑了自定义域名就填自定义域名）：
@@ -175,7 +175,10 @@ cp .env.example .env
 #   ENV_PUBLIC_BASE_URL    — 反代对外的 HTTPS URL，如 https://relay.example.com（必须 https://，不带尾斜杠）
 #   ENV_ADMIN_SECRET       — 运行 `openssl rand -hex 32` 一次得到
 
-# 3. 启动容器（首次构建会拉镜像 + 编译 better-sqlite3，约 1-2 分钟）
+# 3. 建数据目录并交给容器用户（镜像以 uid 10001 运行，目录不归它 SQLite 就打不开），再启动容器
+#    首次构建会拉镜像 + 编译 better-sqlite3，约 1-2 分钟
+mkdir -p data
+sudo chown 10001:10001 data
 docker compose up -d
 
 # 4. 配反代，把 ENV_PUBLIC_BASE_URL 对应的域名 TLS 终止后转发到 127.0.0.1:8080
@@ -196,6 +199,7 @@ Docker 轨故障排查：
 | 症状 | 可能原因 |
 |---|---|
 | 容器启动后立刻退出 + 日志 `fatal: missing env XXX` | `.env` 里某个必填字段没填 |
+| 容器启动后立刻退出 + 日志 `fatal: unable to open database file` | `./data` 不归容器用户 uid 10001（Docker 自动建的、或你自己 `mkdir` 的）：`sudo chown -R 10001:10001 data` 后 `docker compose up -d` |
 | 启动报 `fatal: ENV_PUBLIC_BASE_URL must start with https://` | 填了 `http://` 或裸 hostname；必须 `https://` |
 | 反代收到 502 / 容器健康检查失败 | 容器还没起完，`docker compose logs bot` 看 `listening on :8080`；或反代回源端口错了 |
 | `/admin/registerWebhook` 返回 `Not found` | `ENV_ADMIN_SECRET` 未设、URL 拼错、或 secret 含特殊字符未 URL-encode |
@@ -339,17 +343,17 @@ npx wrangler kv key list --binding=nfd --remote
 npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote
 ```
 
-Docker 轨（数据库是宿主机 `./data/db.sqlite`）：
+Docker 轨（数据库是宿主机 `./data/db.sqlite`，归容器用户 uid 10001，所以宿主机上直接操作它的命令都要 `sudo`）：
 
 ```bash
 # 列所有 key
-sqlite3 ./data/db.sqlite "SELECT key FROM kv ORDER BY key;"
+sudo sqlite3 ./data/db.sqlite "SELECT key FROM kv ORDER BY key;"
 
 # 某个 tenant 的所有 key
-sqlite3 ./data/db.sqlite "SELECT key FROM kv WHERE key LIKE 'tenant:<botId>:%' ORDER BY key;"
+sudo sqlite3 ./data/db.sqlite "SELECT key FROM kv WHERE key LIKE 'tenant:<botId>:%' ORDER BY key;"
 
 # 统计 msg-map / 黑名单条数
-sqlite3 ./data/db.sqlite "SELECT substr(key, 1, instr(key, '-')-1) AS kind, COUNT(*) FROM kv GROUP BY kind;"
+sudo sqlite3 ./data/db.sqlite "SELECT substr(key, 1, instr(key, '-')-1) AS kind, COUNT(*) FROM kv GROUP BY kind;"
 ```
 
 ### 强制清除某个 tenant（绕过管家 bot）
@@ -363,7 +367,7 @@ for key in $(npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" -
 done
 
 # Docker 轨
-sqlite3 ./data/db.sqlite "DELETE FROM kv WHERE key LIKE 'tenant:<botId>:%';"
+sudo sqlite3 ./data/db.sqlite "DELETE FROM kv WHERE key LIKE 'tenant:<botId>:%';"
 ```
 
 记得手动 `curl https://api.telegram.org/bot<token>/deleteWebhook` 解绑 webhook，否则 Telegram 会继续向已删除的 tenant 发更新。
@@ -374,15 +378,23 @@ sqlite3 ./data/db.sqlite "DELETE FROM kv WHERE key LIKE 'tenant:<botId>:%';"
 
 ```bash
 # 推荐：在线 backup，不停服务
-sqlite3 ./data/db.sqlite ".backup ./data/backup-$(date +%F).sqlite"
+sudo sqlite3 ./data/db.sqlite ".backup ./data/backup-$(date +%F).sqlite"
 
-# 或停容器后复制（数据量小、最省事）
+# 或停容器后复制（数据量小、最省事）。必须先停：运行中最近的写入还在 db.sqlite-wal 里，只拷主文件会丢
 docker compose down
-cp ./data/db.sqlite /path/to/backup/db.sqlite
+sudo cp ./data/db.sqlite /path/to/backup/db.sqlite
 docker compose up -d
 ```
 
-恢复就是把备份文件还原回 `./data/db.sqlite`，然后 `docker compose restart bot`。
+恢复要先停容器、删掉残留的 `-wal` / `-shm`（它们属于旧库，留着会被套到还原的文件上），还原后把属主改回 uid 10001：
+
+```bash
+docker compose down
+sudo rm -f ./data/db.sqlite-wal ./data/db.sqlite-shm
+sudo cp /path/to/backup/db.sqlite ./data/db.sqlite
+sudo chown 10001:10001 ./data/db.sqlite
+docker compose up -d
+```
 
 Cloudflare 轨的数据在 KV 云端，没有等价的一键备份；最关键的离线备份对象是 `ENV_MASTER_ENC_KEY` 本身。
 

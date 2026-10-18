@@ -36,8 +36,8 @@ npx wrangler login
 npx wrangler kv namespace create nfd
 ```
 
-Put the returned id in `wrangler.toml` — **the one committed there belongs to
-someone else and must be replaced** — set `ENV_PUBLIC_BASE_URL` under `[vars]`,
+Put the returned id in `wrangler.toml` in place of the
+`REPLACE_WITH_YOUR_KV_NAMESPACE_ID` placeholder, set `ENV_PUBLIC_BASE_URL` under `[vars]`,
 then:
 
 ```bash
@@ -55,6 +55,8 @@ only sends webhooks over HTTPS:
 git clone https://github.com/Lynthar/tg-relay-bot.git
 cd tg-relay-bot
 cp .env.example .env
+mkdir -p data
+sudo chown 10001:10001 data
 docker compose up -d
 ```
 

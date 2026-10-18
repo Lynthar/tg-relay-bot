@@ -112,9 +112,8 @@ npx wrangler login
 # 3. Create the KV namespace
 npx wrangler kv namespace create nfd
 # Paste the returned id into wrangler.toml at id = "..."
-# ⚠️ The id currently in the file belongs to a previous host; if you don't replace it,
-# deploy fails with "KV namespace not found" (or, within the same Cloudflare
-# account, silently binds to the old data).
+# ⚠️ The file ships with the placeholder REPLACE_WITH_YOUR_KV_NAMESPACE_ID;
+# if you don't replace it, deploy fails with "KV namespace not found".
 
 # 4. Add your public URL to wrangler.toml (after deploy it is
 #    https://tg-relay-bot.<your-subdomain>.workers.dev, or your custom domain):
@@ -177,7 +176,11 @@ cp .env.example .env
 #                            https://relay.example.com (must be https://, no trailing slash)
 #   ENV_ADMIN_SECRET       — generate once with `openssl rand -hex 32`
 
-# 3. Start the container (first build pulls the image + compiles better-sqlite3, ~1–2 min)
+# 3. Create the data dir and hand it to the container user (the image runs as uid 10001;
+#    SQLite cannot open its file otherwise), then start the container
+#    (first build pulls the image + compiles better-sqlite3, ~1–2 min)
+mkdir -p data
+sudo chown 10001:10001 data
 docker compose up -d
 
 # 4. Configure your reverse proxy to terminate TLS for ENV_PUBLIC_BASE_URL and forward to 127.0.0.1:8080
@@ -198,6 +201,7 @@ Docker-track troubleshooting:
 | Symptom | Likely cause |
 |---|---|
 | Container exits immediately with `fatal: missing env XXX` | A required field in `.env` isn't set |
+| Container exits immediately with `fatal: unable to open database file` | `./data` isn't owned by the container user, uid 10001 (Docker auto-created it, or you `mkdir`ed it yourself): `sudo chown -R 10001:10001 data`, then `docker compose up -d` |
 | Startup error `fatal: ENV_PUBLIC_BASE_URL must start with https://` | You used `http://` or a bare hostname; must be `https://` |
 | Reverse proxy reports 502 / healthcheck failing | Container not ready yet — `docker compose logs bot` should show `listening on :8080`; or proxy is targeting the wrong upstream port |
 | `/admin/registerWebhook` returns `Not found` | `ENV_ADMIN_SECRET` not set, URL mistyped, or secret contains chars that need URL-encoding |
@@ -341,17 +345,17 @@ npx wrangler kv key list --binding=nfd --remote
 npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" --remote
 ```
 
-Docker track (the state lives in `./data/db.sqlite` on the host):
+Docker track (the state lives in `./data/db.sqlite` on the host, owned by the container user uid 10001, so host-side commands that touch it need `sudo`):
 
 ```bash
 # List all keys
-sqlite3 ./data/db.sqlite "SELECT key FROM kv ORDER BY key;"
+sudo sqlite3 ./data/db.sqlite "SELECT key FROM kv ORDER BY key;"
 
 # All keys for one tenant
-sqlite3 ./data/db.sqlite "SELECT key FROM kv WHERE key LIKE 'tenant:<botId>:%' ORDER BY key;"
+sudo sqlite3 ./data/db.sqlite "SELECT key FROM kv WHERE key LIKE 'tenant:<botId>:%' ORDER BY key;"
 
 # msg-map / blocklist counts
-sqlite3 ./data/db.sqlite "SELECT substr(key, 1, instr(key, '-')-1) AS kind, COUNT(*) FROM kv GROUP BY kind;"
+sudo sqlite3 ./data/db.sqlite "SELECT substr(key, 1, instr(key, '-')-1) AS kind, COUNT(*) FROM kv GROUP BY kind;"
 ```
 
 ### Force-purge a tenant (bypass manager bot)
@@ -365,7 +369,7 @@ for key in $(npx wrangler kv key list --binding=nfd --prefix="tenant:<botId>:" -
 done
 
 # Docker track
-sqlite3 ./data/db.sqlite "DELETE FROM kv WHERE key LIKE 'tenant:<botId>:%';"
+sudo sqlite3 ./data/db.sqlite "DELETE FROM kv WHERE key LIKE 'tenant:<botId>:%';"
 ```
 
 Also `curl https://api.telegram.org/bot<token>/deleteWebhook` to unbind the webhook, otherwise Telegram keeps delivering updates to a tenant that no longer exists.
@@ -376,15 +380,24 @@ Everything is in one file. Either use SQLite's online backup or stop the contain
 
 ```bash
 # Recommended: online backup, no downtime
-sqlite3 ./data/db.sqlite ".backup ./data/backup-$(date +%F).sqlite"
+sudo sqlite3 ./data/db.sqlite ".backup ./data/backup-$(date +%F).sqlite"
 
-# Or: stop, copy, restart
+# Or: stop, copy, restart. Stop first: while running, recent writes are still in
+# db.sqlite-wal, and copying the main file alone loses them
 docker compose down
-cp ./data/db.sqlite /path/to/backup/db.sqlite
+sudo cp ./data/db.sqlite /path/to/backup/db.sqlite
 docker compose up -d
 ```
 
-To restore, replace `./data/db.sqlite` with your backup and `docker compose restart bot`.
+To restore, stop the container and delete any leftover `-wal` / `-shm` (they belong to the old database and would be applied to the restored file), then put the backup back and return ownership to uid 10001:
+
+```bash
+docker compose down
+sudo rm -f ./data/db.sqlite-wal ./data/db.sqlite-shm
+sudo cp /path/to/backup/db.sqlite ./data/db.sqlite
+sudo chown 10001:10001 ./data/db.sqlite
+docker compose up -d
+```
 
 On the Cloudflare track the data lives in KV in their cloud with no one-command backup; the critical thing to back up offline is `ENV_MASTER_ENC_KEY` itself.
 

@@ -4,7 +4,7 @@ compatibility_date = "2025-09-01"
 
 [[kv_namespaces]]
 binding = "nfd"
-id = "c880f077fa9f49678b9f4815a85a7e4f"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"   # from `wrangler kv namespace create nfd`
 
 # ─── Required plain config ─────────────────────────────────────────────────
 #   ENV_PUBLIC_BASE_URL    The https:// origin Telegram reaches this Worker at;
